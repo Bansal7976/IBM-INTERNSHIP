@@ -1,0 +1,42 @@
+# HPC-specific requirements (extends requirements.txt)
+# Optimized for multi-GPU NVIDIA clusters
+
+# Install order matters:
+#   1. pip install -r requirements.txt
+#   2. pip install -r requirements_hpc.txt
+
+# ─── Distributed Training ────────────────────────────────────────────────────
+# torch.distributed is part of PyTorch — no extra install needed
+# NCCL is bundled with torch for GPU; GLOO for CPU fallback
+
+# ─── GPU Optimizations ───────────────────────────────────────────────────────
+# flash-attn>=2.3.0         # Flash Attention 2 (2-4x faster attention, less VRAM)
+                            # Requires: CUDA 11.6+, Ampere GPUs (A100, A10, RTX 30xx+)
+                            # Install: pip install flash-attn --no-build-isolation
+                            # See: github.com/Dao-AILab/flash-attention
+
+# xformers>=0.0.22          # Memory-efficient attention (alternative to flash-attn)
+                            # Install: pip install xformers
+
+# ninja>=1.11               # Fast C++ extension compilation for custom CUDA ops
+ninja>=1.11.1
+
+# ─── MMDetection3D Stack (for BEVFormer / BEVFusion) ─────────────────────────
+# Run these separately (order matters):
+#   pip install -U openmim
+#   mim install mmengine==0.10.4
+#   mim install mmcv==2.1.0
+#   mim install mmdet==3.3.0
+#   mim install mmdet3d==1.4.0
+
+# ─── Profiling and Monitoring ────────────────────────────────────────────────
+wandb>=0.16.0               # Experiment tracking (alternative to TensorBoard)
+# torch-tb-profiler         # PyTorch + TensorBoard profiler
+
+# ─── Data Loading Optimizations ──────────────────────────────────────────────
+# webdataset>=0.2.86        # Efficient sharded dataset format (for large nuScenes/Waymo)
+lmdb>=1.4.0                 # Fast key-value store for image caching
+
+# ─── Multi-node Communication ────────────────────────────────────────────────
+# etcd (for c10d rendezvous): usually installed system-wide on HPC clusters
+# Check: which etcd

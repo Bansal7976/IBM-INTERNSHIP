@@ -1,0 +1,53 @@
+# YOLOv11-large fine-tuned on nuScenes (front camera)
+# Run: python training/train.py --config configs/yolov11/yolov11_nuscenes.yaml
+
+framework: ultralytics
+
+model:
+  name: yolo11l
+  weights: yolo11l.pt
+  pretrained: true
+
+dataset:
+  name: nuscenes
+  yaml: data/nuscenes_yolo/nuscenes.yaml    # from data/prepare_nuscenes.py
+  img_size: 640
+  classes:
+    - car
+    - truck
+    - bus
+    - trailer
+    - construction_vehicle
+    - pedestrian
+    - motorcycle
+    - bicycle
+    - traffic_cone
+    - barrier
+
+training:
+  epochs: 100              # nuScenes is larger, needs more epochs
+  batch_size: 32
+  device: "0,1,2,3"        # 4-GPU training
+  workers: 16
+  project: runs/train
+  name: yolo11l_nuscenes
+  amp: true
+  multi_scale: true        # test at multiple scales
+
+  optimizer: AdamW
+  lr0: 0.001
+  lrf: 0.01
+  warmup_epochs: 5.0
+  weight_decay: 0.0005
+  save_period: 10
+
+  mosaic: 1.0
+  mixup: 0.1
+  copy_paste: 0.1
+  degrees: 3.0
+  translate: 0.1
+  scale: 0.5
+  fliplr: 0.5
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
