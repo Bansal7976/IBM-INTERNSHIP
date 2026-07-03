@@ -1,13 +1,10 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
+env/
 build/
 develop-eggs/
 dist/
@@ -19,76 +16,43 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
 
 # Virtual environments
 venv/
-ENV/
+.env/
 env/
-.venv
+ENV/
 
 # IDEs
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
-*~
-.DS_Store
 
-# Data files (large)
-data/
-*.npy
-*.npz
-*.h5
-*.hdf5
-
-# Model checkpoints
-checkpoints/
-*.pth
+# Project specific
+autonomous_detection/data/kitti/
+autonomous_detection/data/kitti_yolo/
+autonomous_detection/data/nuscenes/
+autonomous_detection/data/nuscenes_yolo/
+autonomous_detection/runs/
+results/
 *.pt
-*.ckpt
+*.onnx
+*.engine
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+!autonomous_detection/configs/yolov11/yolov11_kitti.yaml
 
 # Logs
 logs/
 *.log
 
-# Mac
-.DS_Store
-
-# OS
-.env
-.env.local
+# Jupyter
+.ipynb_checkpoints/

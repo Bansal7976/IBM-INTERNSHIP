@@ -35,61 +35,60 @@ def parse_args():
 
 def evaluate(args):
     from ultralytics import YOLO
-    import torch
-    from torch.utils.data import DataLoader
+    import torch, numpy as np
     from tqdm import tqdm
 
+    device = args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu')
     classes = args.classes or KITTI_CLASSES
-    class_to_idx = {c: i for i, c in enumerate(classes)}
+
+    # KITTIDetectionDataset expects the YOLO-converted root (kitti_yolo)
+    data_path = Path(args.data_root)
+    if (data_path / 'images').exists():
+        kitti_yolo_root = str(data_path)           # already kitti_yolo dir
+    else:
+        kitti_yolo_root = str(data_path.parent / 'kitti_yolo')
 
     dataset = KITTIDetectionDataset(
-        data_root=args.data_root,
+        data_root=kitti_yolo_root,
         split=args.split,
-        classes=classes,
-        img_size=(640, 640),
+        img_size=640,
     )
 
-    model = YOLO(args.weights)
+    model  = YOLO(args.weights)
     metric = MeanAveragePrecision(num_classes=len(classes), class_names=classes)
     cm     = ConfusionMatrix(num_classes=len(classes), conf_threshold=0.25, iou_threshold=0.5)
 
     print(f"Evaluating on {len(dataset)} KITTI {args.split} samples...")
+    print(f"Device: {device}")
 
     all_preds = []
     all_gts   = []
 
     for idx in tqdm(range(len(dataset))):
-        sample = dataset[idx]
-        image_id = sample.image_id
+        sample   = dataset[idx]
+        image_id = sample['image_id']
+        boxes_np = sample['boxes']   # Nx5: [x1,y1,x2,y2,cls_id]
 
-        # Ground truths
-        for box, label in zip(sample.boxes, sample.labels):
+        for row in boxes_np:
+            x1, y1, x2, y2, cls_id = row
             all_gts.append(GroundTruth(
                 image_id=image_id,
-                box=box,
-                class_id=int(label),
+                box=np.array([x1, y1, x2, y2]),
+                class_id=int(cls_id),
             ))
 
-        # Predictions
-        results = model.predict(
-            sample.image,
-            conf=args.conf,
-            iou=args.iou,
-            device=args.device,
-            verbose=False,
-        )
+        img_path = str(dataset.img_dir / f'{image_id}.png')
+        results = model.predict(img_path, conf=args.conf, iou=args.iou,
+                                device=device, verbose=False)
         if results and results[0].boxes is not None:
             r = results[0]
-            boxes   = r.boxes.xyxy.cpu().numpy()
-            scores  = r.boxes.conf.cpu().numpy()
-            cls_ids = r.boxes.cls.cpu().numpy().astype(int)
-            for box, score, cid in zip(boxes, scores, cls_ids):
+            for box, score, cid in zip(r.boxes.xyxy.cpu().numpy(),
+                                       r.boxes.conf.cpu().numpy(),
+                                       r.boxes.cls.cpu().numpy().astype(int)):
                 if cid < len(classes):
                     all_preds.append(DetectionResult(
-                        image_id=image_id,
-                        box=box,
-                        score=float(score),
-                        class_id=int(cid),
+                        image_id=image_id, box=box,
+                        score=float(score), class_id=int(cid),
                     ))
 
     metric.update(all_preds, all_gts)
@@ -104,10 +103,9 @@ def evaluate(args):
     save_dir.mkdir(parents=True, exist_ok=True)
     cm.plot(class_names=classes, save_path=str(save_dir / 'confusion_matrix.png'))
 
-    results = metric.compute()
-    print(f"\nSaved confusion matrix to: {save_dir / 'confusion_matrix.png'}")
-
-    return results
+    results_dict = metric.compute()
+    print(f"\nSaved confusion matrix → {save_dir / 'confusion_matrix.png'}")
+    return results_dict
 
 
 if __name__ == '__main__':

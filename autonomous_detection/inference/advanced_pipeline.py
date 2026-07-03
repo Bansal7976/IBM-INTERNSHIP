@@ -63,11 +63,14 @@ class ADASPerceptionSystem:
         enable_lane: bool = True,
         enable_depth: bool = True,
         enable_collision: bool = True,
-        device: str = 'cuda',
+        device: str = None,           # None = auto-detect GPU/CPU
         conf_threshold: float = 0.25,
         ttc_threshold: float = 2.0,  # seconds
         safety_margin: float = 3.0,   # meters
     ):
+        import torch
+        if device is None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
         """
         Args:
             detector: Model name (yolo11n/m/l/x, rtdetr-l)

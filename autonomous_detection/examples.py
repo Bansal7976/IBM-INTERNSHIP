@@ -12,6 +12,11 @@ from pathlib import Path
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+# ── Auto-detect GPU/CPU ────────────────────────────────────────────────────────
+import torch
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f'[INFO] Using device: {DEVICE}')
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 # EXAMPLE 1: Basic Object Detection (Zero Setup)
@@ -28,12 +33,12 @@ def example_basic_detection():
     print('  EXAMPLE 1: Basic Object Detection')
     print('='*70 + '\n')
 
-    # Load pre-trained model
-    model = YOLO('yolo11m.pt')  # auto-downloads
+    # Load pre-trained model (auto-downloads weights from Ultralytics)
+    model = YOLO('yolo11m.pt')
 
-    # Detect on image
+    # Detect on image (downloads a sample driving image)
     image_url = 'https://ultralytics.com/images/bus.jpg'
-    results = model.predict(image_url, conf=0.25, verbose=False)
+    results = model.predict(image_url, conf=0.25, verbose=False, device=DEVICE)
 
     # Print results
     r = results[0]
@@ -65,31 +70,43 @@ def example_tracking():
 
     model = YOLO('yolo11m.pt')
 
-    # Use a sample video (replace with your own)
-    video_source = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'  # Example
+    # ── Source selection ────────────────────────────────────────────────
+    # Option A: webcam (uncomment below)
+    # video_source = 0
+    #
+    # Option B: local video file (replace path below)
+    # video_source = 'your_video.mp4'
+    #
+    # Option C: download a short sample traffic clip automatically
+    import urllib.request, tempfile
+    sample_url = 'https://ultralytics.com/assets/decelera_landscape_min.mov'
+    tmp = tempfile.NamedTemporaryFile(suffix='.mov', delete=False)
+    print(f'Downloading sample video to {tmp.name} ...')
+    urllib.request.urlretrieve(sample_url, tmp.name)
+    video_source = tmp.name
+    # ───────────────────────────────────────────────────────────────────
 
     print(f'Tracking on: {video_source}')
-    print('Press Q to stop\n')
+    print('Processing frames (this may take a moment)...\n')
 
-    # Track on video (or webcam: source=0)
+    # Track on video
     results = model.track(
         source=video_source,
         conf=0.3,
         iou=0.45,
         tracker='bytetrack.yaml',
         persist=True,
-        device=0,
+        device=DEVICE,
         stream=True,
     )
 
+    max_frames = 120   # process first 120 frames only for quick demo
     for i, result in enumerate(results):
+        if i >= max_frames:
+            break
         if i % 10 == 0:  # Print every 10 frames
-            if result.boxes.id is not None:
-                track_ids = result.boxes.id.int().tolist()
-                print(f'Frame {i}: {len(track_ids)} tracks')
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            n_tracks = len(result.boxes.id.int().tolist()) if result.boxes.id is not None else 0
+            print(f'Frame {i:4d}: {n_tracks} tracks')
 
     print('\nTracking complete.')
 
@@ -120,19 +137,20 @@ def example_training():
     # Load pre-trained model
     model = YOLO('yolo11m.pt')
 
-    # Train on KITTI
-    print('Training on KITTI (this will take ~2-4 hours on a single A100 GPU)\n')
+    # Train on KITTI (GPU: 2-4 hours, CPU: many hours — use HPC for this!)
+    print(f'Training on KITTI using device={DEVICE}\n')
+    batch = 16 if DEVICE == 'cuda' else 4  # reduce batch for CPU
 
     results = model.train(
         data=str(kitti_yaml),
         epochs=50,
         imgsz=640,
-        batch=32,
-        device=0,
-        workers=8,
+        batch=batch,
+        device=DEVICE,
+        workers=4,
         project='runs/train',
         name='kitti_finetune',
-        amp=True,
+        amp=(DEVICE == 'cuda'),   # AMP only works on CUDA
         patience=20,  # early stopping
     )
 
@@ -172,7 +190,7 @@ def example_evaluation():
         data_root='data/kitti',
         split='val',
         conf=0.001,
-        device='cuda',
+        device=DEVICE,
         save_dir='runs/eval',
         classes=None,
     )
@@ -254,7 +272,7 @@ def example_adas_pipeline():
         enable_lane=True,
         enable_depth=True,
         enable_collision=True,
-        device='cuda',
+        device=DEVICE,          # auto-detected: 'cuda' or 'cpu'
     )
 
     print('ADAS system ready.\n')

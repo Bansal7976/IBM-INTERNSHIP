@@ -71,7 +71,7 @@ Examples:
     infer_parser.add_argument('--tracker', default='bytetrack', choices=['bytetrack', 'botsort'])
     infer_parser.add_argument('--save', action='store_true', help='Save output')
     infer_parser.add_argument('--save_dir', default='runs/inference', help='Save directory')
-    infer_parser.add_argument('--device', default='cuda', help='Device')
+    infer_parser.add_argument('--device', default=None, help='Device (auto-detected: cuda or cpu)')
     infer_parser.add_argument('--show', action='store_true', help='Show preview')
 
     # ── EVAL ─────────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ Examples:
     eval_parser.add_argument('--data_root', required=True, help='Dataset root path')
     eval_parser.add_argument('--split', default='val', choices=['train', 'val', 'test'])
     eval_parser.add_argument('--conf', type=float, default=0.001, help='Low conf for PR curve')
-    eval_parser.add_argument('--device', default='cuda', help='Device')
+    eval_parser.add_argument('--device', default=None, help='Device (auto-detected: cuda or cpu)')
     eval_parser.add_argument('--save_dir', default='runs/eval', help='Save directory')
 
     # ── EXPORT ───────────────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ def parse_args():
     p.add_argument('--tracker', default='bytetrack', choices=['bytetrack', 'botsort'])
     p.add_argument('--save', action='store_true', help='Save annotated output')
     p.add_argument('--save_dir', default='runs/inference', help='Output directory')
-    p.add_argument('--device', default='cuda', help='Device: cuda / cpu / mps')
+    p.add_argument('--device', default=None, help='Device: cuda / cpu / mps (auto-detected if not set)')
     p.add_argument('--prompt', default=None, help='Text prompt for Grounding DINO')
     p.add_argument('--show', action='store_true', help='Show live preview')
     return p.parse_args()
@@ -52,13 +52,16 @@ class DetectionPipeline:
         weights: Optional[str] = None,
         conf: float = 0.25,
         iou: float = 0.45,
-        device: str = 'cuda',
+        device: str = None,         # None = auto-detect
         enable_tracking: bool = False,
         tracker_type: str = 'bytetrack',
     ):
-        import sys
+        import sys, torch
         sys.path.insert(0, str(Path(__file__).parent.parent))
         from models.detector_2d import build_detector_2d
+        if device is None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f'[Pipeline] Device: {device}')
 
         self.detector = build_detector_2d({
             'type': model_type,
