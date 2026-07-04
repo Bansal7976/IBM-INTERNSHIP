@@ -65,6 +65,7 @@ def train_ultralytics(cfg: dict, args):
         amp=train_cfg.get('amp', True),
         multi_scale=train_cfg.get('multi_scale', False),
         freeze=model_cfg.get('freeze_layers'),
+        patience=train_cfg.get('patience', 50),
         lr0=train_cfg.get('lr0', 0.01),
         lrf=train_cfg.get('lrf', 0.01),
         warmup_epochs=train_cfg.get('warmup_epochs', 3),

@@ -24,7 +24,8 @@ dataset:
     - Misc
 
 training:
-  epochs: 50
+  epochs: 500
+  patience: 50             # early stopping if no improvement for 50 epochs
   batch_size: 16           # per GPU; effective = batch × num_gpus
   device: "0"              # "0" single GPU, "0,1,2,3" multi-GPU
   workers: 8
