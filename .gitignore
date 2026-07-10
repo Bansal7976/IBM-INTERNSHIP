@@ -69,8 +69,17 @@ env/
 *~
 .DS_Store
 
-# Data files (large)
-data/
+# Data files (large) — keep the .py preparation scripts, ignore dataset content
+autonomous_detection/data/*
+!autonomous_detection/data/*.py
+data/kitti*/
+data/nuscenes*/
+data/bdd100k*/
+data/culane/
+data/lisa*/
+data/exdark/
+data/merged_yolo/
+data/*_crops/
 *.npy
 *.npz
 *.h5
@@ -92,3 +101,11 @@ logs/
 # OS
 .env
 .env.local
+
+# Phase 3 artifacts
+weights/
+runs/**/weights/
+external/
+*.mp4
+*.engine
+*.onnx
