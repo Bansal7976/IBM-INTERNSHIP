@@ -1,0 +1,39 @@
+#!/bin/bash
+# JOBS C + D + F — classifiers + full evaluation (1 GPU, ~5h total)
+# Run AFTER Jobs A and B finish.
+# Submit:  qsub training/pbs/aux_and_eval.pbs
+#PBS -N aux_and_eval
+#PBS -l select=1:ncpus=16:ngpus=1:mem=64gb
+#PBS -l walltime=08:00:00
+#PBS -j oe
+#PBS -o logs/aux_and_eval.log
+#PBS -V
+
+set -uo pipefail   # no -e: each stage is independent, continue on failure
+cd "$PBS_O_WORKDIR"
+mkdir -p logs
+
+module load cuda/11.8 2>/dev/null || true
+source activate autodet 2>/dev/null || conda activate autodet
+
+echo "=== JOB C: traffic-light state classifier (LISA) ==="
+if [ -d data/lisa_tl ]; then
+    python training/train_aux_classifiers.py prepare-lisa --lisa data/lisa_tl
+    python training/train_aux_classifiers.py train-tl
+else
+    echo "[skip] data/lisa_tl missing"
+fi
+
+echo "=== JOB D: lane-type classifier (BDD100K — Plan A only) ==="
+if [ -d data/bdd100k/labels ]; then
+    python training/train_aux_classifiers.py prepare-lanes --bdd data/bdd100k
+    python training/train_aux_classifiers.py train-lane
+else
+    echo "[skip] BDD100K missing — Plan B uses the heuristic (KRISH_HANDOVER.md 3.3-B5)"
+fi
+
+echo "=== JOB F: full evaluation suite ==="
+python evaluation/evaluate_final.py \
+  --weights runs/final/yolo11x_merged/weights/best.pt
+
+echo "=== ALL DONE — see runs/final_evaluation.json ==="

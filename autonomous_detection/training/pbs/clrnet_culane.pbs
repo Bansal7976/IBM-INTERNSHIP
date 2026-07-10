@@ -1,0 +1,46 @@
+#!/bin/bash
+# JOB B — Lane detection: CLRNet ResNet-101 on CULane  (PBS version)
+# Submit:  qsub training/pbs/clrnet_culane.pbs
+#PBS -N clrnet_culane
+#PBS -l select=1:ncpus=32:ngpus=4:mem=128gb
+#PBS -l walltime=36:00:00
+#PBS -j oe
+#PBS -o logs/clrnet_culane.log
+#PBS -V
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+mkdir -p logs
+
+module load cuda/11.8 2>/dev/null || true
+source activate autodet 2>/dev/null || conda activate autodet
+
+# One-time setup
+if [ ! -d external/CLRNet ]; then
+    git clone https://github.com/Turoad/CLRNet.git external/CLRNet
+    cd external/CLRNet
+    pip install -r requirements.txt
+    python setup.py build develop
+    cd "$PBS_O_WORKDIR"
+fi
+
+if [ ! -d data/culane/driver_23_30frame ]; then
+    echo "ERROR: CULane dataset missing — see KRISH_HANDOVER.md section 3.1"
+    exit 1
+fi
+
+cd external/CLRNet
+ln -sfn "$PBS_O_WORKDIR/data/culane" data/CULane
+
+# Train
+python main.py configs/clrnet/clr_resnet101_culane.py --gpus 0 1 2 3
+
+# Evaluate per-category (Curve + Night F1 go in the report)
+python main.py configs/clrnet/clr_resnet101_culane.py --validate \
+  --load_from work_dirs/clr/r101_culane/*/ckpt/best.pth \
+  2>&1 | tee "$PBS_O_WORKDIR/logs/clrnet_per_category_eval.txt"
+
+mkdir -p "$PBS_O_WORKDIR/weights"
+cp work_dirs/clr/r101_culane/*/ckpt/best.pth \
+   "$PBS_O_WORKDIR/weights/clrnet_r101_culane.pth"
+echo "=== CLRNet weights -> weights/clrnet_r101_culane.pth ==="

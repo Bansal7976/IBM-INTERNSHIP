@@ -1,7 +1,7 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 *.so
 .Python
 env/
@@ -32,13 +32,34 @@ ENV/
 *.swp
 *.swo
 
-# Project specific
+# Project specific (from both branches)
 autonomous_detection/data/kitti/
 autonomous_detection/data/kitti_yolo/
 autonomous_detection/data/nuscenes/
 autonomous_detection/data/nuscenes_yolo/
 autonomous_detection/runs/
 results/
+
+# Data files (large) - keep the .py preparation scripts, ignore dataset content
+autonomous_detection/data/*
+!autonomous_detection/data/*.py
+!autonomous_detection/data/*_local.py
+data/kitti*/
+data/nuscenes*/
+data/bdd100k*/
+data/culane/
+data/lisa*/
+data/exdark/
+data/merged_yolo/
+data/*_crops/
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Model checkpoints
+checkpoints/
+*.pth
 *.pt
 *.onnx
 *.engine
@@ -56,3 +77,18 @@ logs/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Mac
+.DS_Store
+
+# OS
+.env
+.env.local
+
+# Phase 3 artifacts
+weights/
+runs/**/weights/
+external/
+*.mp4
+*.engine
+*.onnx
