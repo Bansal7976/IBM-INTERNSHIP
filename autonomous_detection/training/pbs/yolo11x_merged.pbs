@@ -1,0 +1,51 @@
+#!/bin/bash
+# JOB A — Final detector: YOLOv11x on merged dataset @ 1280px  (PBS version)
+# Submit:  qsub training/pbs/yolo11x_merged.pbs
+# Status:  qstat -u $USER
+#PBS -N yolo11x_merged
+#PBS -l select=1:ncpus=64:ngpus=8:mem=256gb
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#PBS -o logs/yolo11x_merged.log
+#PBS -V
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+mkdir -p logs
+
+module load cuda/11.8 2>/dev/null || true
+source activate autodet 2>/dev/null || conda activate autodet
+
+if [ ! -f data/merged_yolo/merged.yaml ]; then
+    echo "ERROR: run 'python data/prepare_merged.py' first"
+    exit 1
+fi
+
+yolo detect train \
+  model=yolo11x.pt \
+  data=data/merged_yolo/merged.yaml \
+  imgsz=1280 \
+  epochs=300 \
+  batch=128 \
+  device=0,1,2,3,4,5,6,7 \
+  optimizer=AdamW \
+  lr0=0.0005 \
+  cos_lr=True \
+  warmup_epochs=5 \
+  mosaic=1.0 \
+  mixup=0.15 \
+  copy_paste=0.3 \
+  hsv_v=0.6 \
+  degrees=5.0 \
+  perspective=0.0005 \
+  close_mosaic=20 \
+  patience=50 \
+  save_period=25 \
+  workers=32 \
+  project=runs/final \
+  name=yolo11x_merged
+
+echo "=== TRAINING COMPLETE ==="
+yolo detect val \
+  model=runs/final/yolo11x_merged/weights/best.pt \
+  data=data/merged_yolo/merged.yaml imgsz=1280 batch=64 device=0

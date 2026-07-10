@@ -233,6 +233,25 @@ Plan A (less real night data), and lane-type accuracy ~90% (heuristic) vs ~95%
 
 # 4. HPC EXECUTION — JOB BY JOB
 
+## 4.0 SLURM ya PBS? Pehle check karo
+
+```bash
+which sbatch && echo "SLURM cluster"     # -> use training/slurm/*.sh  (sbatch)
+which qsub   && echo "PBS cluster"       # -> use training/pbs/*.pbs   (qsub)
+```
+
+Both versions of every job script exist — same training, different scheduler:
+
+| Job | SLURM | PBS |
+|---|---|---|
+| A (detector) | `sbatch training/slurm/yolo11x_merged.sh` | `qsub training/pbs/yolo11x_merged.pbs` |
+| B (lanes) | `sbatch training/slurm/clrnet_culane.sh` | `qsub training/pbs/clrnet_culane.pbs` |
+| C+D+F (classifiers+eval) | run interactively (§4 below) | `qsub training/pbs/aux_and_eval.pbs` |
+
+PBS monitoring: `qstat -u $USER` (status), `qdel <jobid>` (cancel),
+`tail -f logs/yolo11x_merged.log` (live output). If your cluster's PBS needs a
+queue name, add `#PBS -q <queue>` (find queues with `qstat -Q`).
+
 ## Job order (A and B run in parallel; C/D/E after; F last)
 
 ```
