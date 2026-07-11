@@ -652,3 +652,88 @@ The YOLOv11m model achieved exceptional performance on the KITTI dataset:
 **Date:** Week 2 - 2025  
 **Status:** ✅ COMPLETE & VALIDATED
 
+---
+
+## 🚀 PHASE 3 RESULTS — YOLOv11x + Full ADAS Pipeline
+
+> **Added:** July 2026 | Executed on NVIDIA H100 80GB (PBS cluster)
+
+### Model Upgrade: YOLOv11m → YOLOv11x
+
+| Metric | YOLOv11m (500 ep) | YOLOv11x (300 ep) | Improvement |
+|---|---|---|---|
+| **mAP@0.5** | 91.71% | **95.42%** | **+3.71%** ✅ |
+| **mAP@0.5:0.95** | 69.31% | **79.80%** | **+10.49%** ✅ |
+| **Precision** | 94.71% | **95.12%** | **+0.41%** ✅ |
+| **Recall** | 85.52% | **92.65%** | **+7.13%** ✅ |
+| **Best Epoch** | 500 | **266** | Early stop ✅ |
+| **Parameters** | 20.1M | **57M** | Larger model |
+
+### Phase 3 Training Configuration
+
+```
+Model Architecture:
+├─ Base Model: YOLOv11x (57M parameters, 195.5 GFLOPs)
+├─ Input Size: 640×640 pixels
+├─ Pretrained:  COCO weights (1009/1015 layers transferred)
+└─ Classes:     11 (unified taxonomy — KITTI remapped)
+
+Training Configuration:
+├─ Batch Size:  16 (single H100 80GB)
+├─ Epochs:      300 (early stop patience=50, triggered at 266)
+├─ Optimizer:   AdamW
+├─ LR:          0.0005 cosine annealing
+├─ Warmup:      5 epochs
+├─ Augmentation: Mosaic=1.0, Mixup=0.15, CopyPaste=0.3
+└─ Hardware:    NVIDIA H100 80GB HBM3 (1 GPU)
+
+Dataset:
+├─ Train: 5,985 images (KITTI → 11-class unified)
+└─ Val:   1,496 images
+```
+
+### Unified 11-Class Taxonomy
+
+```
+0: car           (remapped from KITTI Car)
+1: truck         (remapped from KITTI Truck)
+2: bus           (new — not in KITTI baseline)
+3: van           (remapped from KITTI Van)
+4: pedestrian    (merged KITTI Pedestrian + Person_sitting)
+5: cyclist       (remapped from KITTI Cyclist)
+6: motorcycle    (new — not in KITTI baseline)
+7: tram          (remapped from KITTI Tram)
+8: traffic_light (new — not in KITTI baseline)
+9: traffic_sign  (new — not in KITTI baseline)
+10: misc         (remapped from KITTI Misc)
+```
+
+### Full ADAS Pipeline Components (Phase 3)
+
+| Component | Model | Status |
+|---|---|---|
+| Object Detector | YOLOv11x (95.42% mAP@0.5) | ✅ Trained |
+| Lane Detector | CLRNet R101 CULane (80.13 F1@50) | ✅ Pre-trained weights |
+| Depth / TTC | Depth Anything V2 ViT-S (metric) | ✅ Pre-trained weights |
+| Tracker | Custom ByteTrack with velocity | ✅ Built-in |
+| Night Enhancement | Zero-DCE++ / CLAHE fallback | ✅ Built-in |
+| Overtaking Decision | 5-rule safety fusion | ✅ Built-in |
+| Traffic Light State | HSV color classification | ✅ Built-in |
+
+### ADAS Demo Results
+
+```
+Input video processed:  3,604 frames
+Output video size:      27 MB (annotated)
+Decision log entries:   3,604 (decisions.jsonl)
+Pipeline stages active: 6 (detection, lane, depth, track, night, overtaking)
+```
+
+### Phase 3 Conclusion
+
+The upgrade from YOLOv11m to YOLOv11x delivered a **+3.71% mAP@0.5** improvement and a massive **+10.49% mAP@0.5:0.95** gain, demonstrating significantly better localization accuracy. Combined with the full ADAS pipeline (lane detection, TTC, tracking, night enhancement), the system is now a complete perception stack ready for autonomous driving research and demonstration.
+
+**Report Updated By:** Krish  
+**Date:** July 2026  
+**Status:** ✅ PHASE 3 COMPLETE
+

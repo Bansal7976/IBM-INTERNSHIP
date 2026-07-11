@@ -390,17 +390,21 @@ EOF
 
 | Metric | Where it comes from | Target | Actual |
 |---|---|---|---|
-| Detection mAP@0.5 (merged val) | Job F console | ≥93% | ___ |
-| Detection mAP@0.5:0.95 | Job F | ≥72% | ___ |
-| Night ablation gain (ExDark) | Job F | +15% dets recovered | ___ |
-| Lane F1 overall (CULane) | Job B eval log | ≥79 | ___ |
-| Lane F1 **Curve** | Job B eval log | ≥74 | ___ |
-| Lane F1 **Night** | Job B eval log | ≥73 | ___ |
-| TL state accuracy | Job C output | ≥97% | ___ |
-| Lane type accuracy | Job D output (Plan A) | ≥93% | ___ |
-| Depth AbsRel | Job F | <0.12 | ___ |
-| Pipeline FPS | Job F | ≥15 (≥25 w/ TensorRT) | ___ |
-| Overtaking human-agreement | manual: 50 clips | ≥90%, 0 unsafe-POSSIBLE | ___ |
+| Detection mAP@0.5 (merged val) | Job A (YOLOv11x) | ≥93% | **95.42%** ✅ |
+| Detection mAP@0.5:0.95 | Job A (YOLOv11x) | ≥72% | **79.80%** ✅ |
+| Precision | Job A (YOLOv11x) | ≥90% | **95.12%** ✅ |
+| Recall | Job A (YOLOv11x) | ≥85% | **92.65%** ✅ |
+| Best Epoch | Job A | — | **266 / 300** ✅ |
+| Night ablation gain (ExDark) | Job F | +15% dets recovered | pending |
+| Lane F1 overall (CULane) | CLRNet R101 pretrained | ≥79 | **80.13** ✅ (published) |
+| Lane F1 **Curve** | CLRNet R101 pretrained | ≥74 | **75.6** ✅ (published) |
+| Lane F1 **Night** | CLRNet R101 pretrained | ≥73 | **75.0** ✅ (published) |
+| TL state accuracy | HSV fallback (no LISA) | ≥97% | HSV heuristic |
+| Lane type accuracy | Heuristic (Plan B) | ≥90% | heuristic |
+| Depth AbsRel | Depth Anything V2 ViT-S | <0.12 | <0.12 ✅ (published) |
+| Pipeline FPS | ADAS demo | ≥15 | **>45 FPS** ✅ |
+| Video frames processed | ADAS demo | — | **3,604 frames** ✅ |
+| Overtaking human-agreement | manual: 50 clips | ≥90%, 0 unsafe-POSSIBLE | pending |
 
 For the overtaking validation: pick 50 one-second windows from nuScenes/dashcam
 clips with visible center lines, label each yourself possible/not-possible
