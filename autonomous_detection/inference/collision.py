@@ -55,28 +55,51 @@ class CollisionDetector:
 
         for t in tracks:
             active_ids.add(t.track_id)
-            if lanes is not None and not self._in_ego_path(t, lanes, frame.shape):
-                continue
 
             dist = self._object_distance(t.bbox)
             if dist is None:
                 continue
 
+            # BUG FIX: distance history (and therefore depth_speed_mps) used to
+            # only get built for objects inside our own ego-path, because the
+            # ego-path check used to `continue` before any of this ran. That
+            # meant oncoming-lane vehicles never got a depth_speed_mps, so
+            # overtaking.py's oncoming-traffic rule silently treated every
+            # oncoming car as stationary (closing speed = ego speed only),
+            # which OVERESTIMATES the time until it arrives -> unsafe
+            # "OVERTAKE POSSIBLE" calls. Track distance/speed for every object
+            # first; only gate the BRAKE/WARNING *alerts* by ego-path below.
             hist = self.dist_history.setdefault(
                 t.track_id, deque(maxlen=self.history_len)
             )
             hist.append(dist)
 
+            closing = None
             if len(hist) >= 5:
                 elapsed = (len(hist) - 1) / self.fps
                 closing = (hist[0] - hist[-1]) / elapsed  # m/s, + = approaching
-                if closing > self.min_closing_speed:
-                    ttc = dist / closing
-                    cls_name = getattr(t, "class_name", str(getattr(t, "cls", "?")))
-                    if ttc < self.critical_ttc:
-                        alerts.append(Alert("BRAKE", t.track_id, cls_name, dist, ttc, tuple(t.bbox)))
-                    elif ttc < self.warning_ttc:
-                        alerts.append(Alert("WARNING", t.track_id, cls_name, dist, ttc, tuple(t.bbox)))
+                # Exposed for overtaking.py's oncoming/lead-vehicle speed rules.
+                t.depth_speed_mps = closing
+
+            # BUG FIX: this used to be `if lanes is not None and not
+            # self._in_ego_path(...)`, which short-circuited BEFORE ever
+            # calling _in_ego_path() when lanes is None — meaning the
+            # documented "fall back to the central 40% of the frame" behavior
+            # in _in_ego_path() could never run, and EVERY tracked object
+            # anywhere in the frame (oncoming lane, sidewalk, parked cars)
+            # would raise BRAKE/WARNING alerts whenever lane detection was
+            # unavailable for a frame. _in_ego_path() already handles
+            # lanes=None internally, so just always call it.
+            if not self._in_ego_path(t, lanes, frame.shape):
+                continue
+
+            if closing is not None and closing > self.min_closing_speed:
+                ttc = dist / closing
+                cls_name = getattr(t, "class_name", str(getattr(t, "cls", "?")))
+                if ttc < self.critical_ttc:
+                    alerts.append(Alert("BRAKE", t.track_id, cls_name, dist, ttc, tuple(t.bbox)))
+                elif ttc < self.warning_ttc:
+                    alerts.append(Alert("WARNING", t.track_id, cls_name, dist, ttc, tuple(t.bbox)))
 
         # Drop history of vanished tracks
         for tid in list(self.dist_history):

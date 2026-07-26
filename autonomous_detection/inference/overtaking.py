@@ -13,11 +13,13 @@ uncertain input fails toward NOT POSSIBLE.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
 import numpy as np
+
+from models.ipm import IPMTransformer
 
 
 class OvertakeStatus(Enum):
@@ -37,9 +39,24 @@ VEHICLE_CLASSES = {"car", "truck", "bus", "van", "motorcycle"}
 @dataclass
 class OvertakingAnalyzer:
     min_gap_seconds: float = 8.0        # time window needed to complete an overtake
-    max_curvature: float = 0.003        # 1/m in BEV — beyond this it's a blind curve
+    max_curvature: float = 0.003        # PIXEL-space fallback only (see ipm below) —
+                                         # beyond this it's a blind curve; uncalibrated,
+                                         # kept only for when no IPM geometry is available
+    min_curve_radius_m: float = 150.0   # metric threshold once IPM is available — a
+                                         # conservative distance above urban minimum-curve
+                                         # standards (AASHTO/IRC), tight enough to correctly
+                                         # block mountain switchback overtakes; see models/ipm.py
     min_lead_gap_m: float = 25.0        # clear road needed ahead of the lead vehicle
     dark_brightness_threshold: float = 40.0
+    ipm: Optional[IPMTransformer] = field(default=None, repr=False)
+    last_curve_radius_m: Optional[float] = field(default=None, init=False, repr=False)
+
+    def __post_init__(self):
+        if self.ipm is None:
+            self.ipm = IPMTransformer.load()   # auto-load weights/ipm_calibration.json if present
+            if self.ipm is None:
+                print("[overtaking] No IPM calibration found — curve check falls back "
+                      "to uncalibrated pixel curvature (see models/ipm.py to calibrate).")
 
     def analyze(self, lanes, lane_types: dict, tracks: list,
                 depth_map: Optional[np.ndarray], ego_speed_mps: float,
@@ -55,10 +72,18 @@ class OvertakingAnalyzer:
         if ltype in SOLID_TYPES or ltype == "unknown":
             return OvertakeStatus.NOT_POSSIBLE_SOLID_LINE
 
-        # RULE 2: geometry — road straight enough to see the overtake distance
-        curvature = self._estimate_curvature(center)
-        if curvature is None or curvature > self.max_curvature:
-            return OvertakeStatus.NOT_POSSIBLE_CURVE
+        # RULE 2: geometry — road straight enough to see the overtake distance.
+        # Prefer real-world radius (meters) via IPM; falls back to the
+        # uncalibrated pixel heuristic only if no camera calibration exists.
+        if self.ipm is not None:
+            _, radius_m = self.ipm.curvature_from_polyline(center)
+            self.last_curve_radius_m = radius_m
+            if radius_m is None or radius_m < self.min_curve_radius_m:
+                return OvertakeStatus.NOT_POSSIBLE_CURVE
+        else:
+            curvature = self._estimate_curvature(center)
+            if curvature is None or curvature > self.max_curvature:
+                return OvertakeStatus.NOT_POSSIBLE_CURVE
 
         # RULE 3: visibility — unlit darkness kills depth reliability
         if lighting_state == "NIGHT_UNLIT" or scene_brightness < self.dark_brightness_threshold:

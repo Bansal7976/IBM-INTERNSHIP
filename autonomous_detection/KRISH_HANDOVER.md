@@ -10,6 +10,15 @@
 
 Both plans produce the complete end product. Plan B loses ~nothing on features, slightly less night-training data.
 
+**Changelog since your Phase 3 push (8e4bcf9):** three real bugs found by deep-review + one accuracy gap closed, all in the decision layer (lane math / collision / overtaking), not the detector. Your 95.42% mAP detector training is untouched and still valid. Details + a 2-minute test to prove it all works: **Section 1.5** right below.
+
+| # | File | What was wrong | Fixed |
+|---|---|---|---|
+| 1 | `models/lane_detector.py` (CLRNet) | Coordinate-scaling line always multiplied by frame width regardless of whether coords were already pixel-scale — could blow lane polylines up to nonsense numbers | Only rescale when coords are actually normalized |
+| 2 | `inference/collision.py` | Distance/speed history was only ever built for objects inside our own lane, so `depth_speed_mps` (the real closing speed) was **never set** on oncoming-lane vehicles — `overtaking.py`'s oncoming-traffic rule silently assumed oncoming cars were stationary, overestimating the safe window | History + speed now tracked for every object; alerts still scoped to ego-path only |
+| 3 | `inference/collision.py` | The ego-path check used `if lanes is not None and not _in_ego_path(...)`, which skipped calling `_in_ego_path()` entirely whenever lanes were `None` — so its documented "fall back to center 40% of frame" behavior could never run, and every object anywhere in frame would raise alerts when lane detection was down for a frame | Always call `_in_ego_path()`; it already handles `lanes=None` |
+| 4 (gap, not a bug) | `inference/overtaking.py` | Curve/visibility rule compared **pixel-space** curvature against a hand-picked number with no real-world meaning — unreliable exactly on the mountain/switchback roads this project needs to handle | New `models/ipm.py`: converts lane polylines to real ground-plane meters (standard ADAS Inverse Perspective Mapping) and compares against actual road-design curve-radius standards (AASHTO/IRC) |
+
 ---
 
 # 0. WHAT THE FINAL PRODUCT IS
@@ -59,6 +68,49 @@ python -c "from ultralytics import YOLO; YOLO('yolo11x.pt'); print('OK')"
 
 ---
 
+# 1.5 VALIDATE THE DECISION LOGIC FIRST (2 minutes — do this before any GPU job)
+
+Job A (detector) takes ~36h, Job B (lanes) takes ~24h. If a bug in the
+**decision logic** (TTC math, overtaking rules, lane coordinate handling —
+not the detector itself) breaks something, you don't want to find that out
+after burning 2 days of GPU time. This runs every decision rule against
+synthetic data — no GPU, no weights, no dataset, seconds to run:
+
+```bash
+python scripts/verify_adas_pipeline.py
+```
+
+Expected output: `ALL CHECKS PASSED (14/14)`. If anything says `FAIL`, stop
+and fix it (or ping Vishal) before touching `qsub`/`sbatch` — it tells you
+exactly which rule broke and why. This script is also how the 3 bugs in the
+changelog above were caught, so it's a real regression net, not a formality.
+
+**One more one-time step — calibrate real-world curve detection:**
+The overtaking module's curve/blind-corner check needs to know how camera
+pixels map to real road meters (this is what turns "curvature" from a
+meaningless pixel number into an actual curve radius you can trust — see
+`models/ipm.py` docstring for the full explanation). Two options:
+
+```bash
+# Option A — training on KITTI footage: exact, automatic, nothing to do.
+# IPMTransformer.from_kitti_calib() reads KITTI's calib_cam_to_cam.txt directly.
+
+# Option B — any other dashcam footage: one-time manual calibration.
+# Pick one clear frame of a STRAIGHT, FLAT, EMPTY road from your video and run:
+python models/ipm.py calibrate path/to/a_straight_road_frame.jpg
+# Click 4 points (near-left, near-right, far-left, far-right lane-line points),
+# enter the lane width and the two distances when prompted (defaults are fine
+# for a standard ~3.5 m lane). Saves to weights/ipm_calibration.json — reused
+# automatically by every future run of inference/adas_final.py from that camera.
+```
+
+If you skip this, `overtaking.py` auto-detects the missing calibration and
+falls back to the old pixel-based heuristic (prints a warning, doesn't
+crash) — so nothing breaks, but the curve/mountain-road detection you asked
+about is meaningfully more reliable once calibrated.
+
+---
+
 # 2. FILE MAP — WHAT EXISTS AND WHAT IT DOES
 
 ```
@@ -71,7 +123,10 @@ autonomous_detection/
 │   └── night_enhance.py     Day/night classifier + Zero-DCE++ (CLAHE fallback)
 ├── models/
 │   ├── lane_detector.py     CLRNet + UFLDv2 wrappers (lane polylines)
-│   └── aux_classifiers.py   Traffic-light state + lane-type (solid/dashed)
+│   ├── aux_classifiers.py   Traffic-light state + lane-type (solid/dashed)
+│   └── ipm.py               NEW — pixel→real-meters curvature (see §1.5)
+├── scripts/
+│   └── verify_adas_pipeline.py  NEW — 2-min logic smoke test, run before HPC (see §1.5)
 ├── data/
 │   ├── prepare_kitti.py     KITTI → YOLO (already used in Week 1)
 │   ├── prepare_nuscenes.py  nuScenes → YOLO (multi-camera 2D projection)

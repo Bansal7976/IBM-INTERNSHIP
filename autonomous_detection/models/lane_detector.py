@@ -86,7 +86,14 @@ class CLRNetWrapper:
             pts = pts[(pts[:, 0] > 0) & (pts[:, 1] > 0)]
             if len(pts) < 2:
                 continue
-            pts[:, 0] *= w0 / 1.0 if pts[:, 0].max() > 2 else w0
+            # to_array() may return pixel coords already (CLRNet's own convention
+            # varies by config) or normalized [0,1] coords depending on cfg.ori_img_h/w.
+            # BUG FIX: the old line always multiplied by w0 regardless of the
+            # ternary branch (`w0/1.0 if cond else w0` both equal w0), so pixel-
+            # scale output got re-multiplied by w0 and blew up to nonsense
+            # coordinates -> polylines silently unusable downstream.
+            if pts[:, 0].max() <= 2:
+                pts[:, 0] *= w0
             pts[:, 1] = pts[:, 1] * scale_y + self.cut_height \
                 if pts[:, 1].max() <= 2 else pts[:, 1]
             result.polylines.append(pts.astype(np.float32))
