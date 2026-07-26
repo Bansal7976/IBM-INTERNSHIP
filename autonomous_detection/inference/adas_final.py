@@ -21,6 +21,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from models.ipm import describe_radius
+
 PROJECT_ROOT = Path(__file__).parent.parent
 
 CLASS_NAMES = {
@@ -230,6 +232,9 @@ class ADASFinalPipeline:
         h, w = out.shape[:2]
         cv2.rectangle(out, (0, 0), (w, 78), (20, 20, 20), -1)
         overtake_txt = r.overtaking.value if r.overtaking else "OVERTAKE: N/A"
+        radius_m = getattr(self.overtaking, "last_curve_radius_m", None)
+        if radius_m is not None:
+            overtake_txt += f"  (curve radius ~{radius_m:.0f}m)"
         ok = r.overtaking is not None and "POSSIBLE" == r.overtaking.name
         cv2.putText(out, overtake_txt, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 255, 0) if ok else (0, 100, 255), 2)
@@ -263,10 +268,13 @@ def main():
         r = pipe.process_frame(frame)
         vis = pipe.draw(frame, r)
 
+        radius_m = getattr(pipe.overtaking, "last_curve_radius_m", None)
         log.write(json.dumps({
             "frame": pipe._frame_idx, "lighting": r.lighting,
             "traffic_light": r.traffic_light,
             "overtaking": r.overtaking.name if r.overtaking else None,
+            "curve_radius_m": round(radius_m, 1) if radius_m else None,
+            "curve_desc": describe_radius(radius_m) if radius_m else None,
             "alerts": [{"level": a.level, "ttc": round(a.ttc_s, 2),
                         "dist": round(a.distance_m, 1)}
                        for a in r.collision_alerts],
