@@ -10,18 +10,39 @@
 
 Both plans produce the complete end product. Plan B loses ~nothing on features, slightly less night-training data.
 
-**Changelog since your Phase 3 push (8e4bcf9):** three real bugs found by deep-review + one accuracy gap closed, all in the decision layer (lane math / collision / overtaking), not the detector. Your 95.42% mAP detector training is untouched and still valid. Details + a 2-minute test to prove it all works: **Section 1.5** right below.
+---
 
-| # | File | What was wrong | Fixed |
+## STATUS — READ THIS FIRST (what you reported, what it was, what's true now)
+
+You reported two things after Phase 3: **too many fake detections** and
+**lane detection basically not working on Indian videos**. Here's exactly
+what was wrong and what's actually fixed vs. what still needs you to run a
+command.
+
+| # | You reported / we found | Root cause (plain language) | Is it fixed? |
 |---|---|---|---|
-| 1 | `models/lane_detector.py` (CLRNet) | Coordinate-scaling line always multiplied by frame width regardless of whether coords were already pixel-scale — could blow lane polylines up to nonsense numbers | Only rescale when coords are actually normalized |
-| 2 | `inference/collision.py` | Distance/speed history was only ever built for objects inside our own lane, so `depth_speed_mps` (the real closing speed) was **never set** on oncoming-lane vehicles — `overtaking.py`'s oncoming-traffic rule silently assumed oncoming cars were stationary, overestimating the safe window | History + speed now tracked for every object; alerts still scoped to ego-path only |
-| 3 | `inference/collision.py` | The ego-path check used `if lanes is not None and not _in_ego_path(...)`, which skipped calling `_in_ego_path()` entirely whenever lanes were `None` — so its documented "fall back to center 40% of frame" behavior could never run, and every object anywhere in frame would raise alerts when lane detection was down for a frame | Always call `_in_ego_path()`; it already handles `lanes=None` |
-| 4 (gap, not a bug) | `inference/overtaking.py` | Curve/visibility rule compared **pixel-space** curvature against a hand-picked number with no real-world meaning — unreliable exactly on the mountain/switchback roads this project needs to handle | New `models/ipm.py`: converts lane polylines to real ground-plane meters (standard ADAS Inverse Perspective Mapping) and compares against actual road-design curve-radius standards (AASHTO/IRC) |
-| 5 | `data/__init__.py` | Pre-existing (since before Phase 3) — imported a name (`NUSCENES_DETECTION_CLASSES`) from the wrong file, so any `import data...` (as opposed to running scripts directly) raised `ImportError` | Import from `prepare_nuscenes.py`, where it's actually defined |
+| 1 | CLRNet lane lines looked like garbage / nonsense coordinates | A copy-paste math bug always re-scaled lane points by the frame width even when they were already in pixel units — blowing the numbers up | ✅ **Fixed in code, nothing to do.** Just re-run the pipeline. |
+| 2 | (found during review, not reported, but safety-relevant) Overtaking sometimes said POSSIBLE when an oncoming car was actually close and fast | The code never measured how fast oncoming-lane vehicles were approaching — it silently assumed they were standing still | ✅ **Fixed in code, nothing to do.** |
+| 3 | (found during review) Collision alerts sometimes fired for things nowhere near the car | A guard condition skipped the "which objects are actually in my lane" check whenever lane detection had no output for a frame | ✅ **Fixed in code, nothing to do.** |
+| 4 | Overtake "possible on this curve" felt arbitrary, especially on mountain/curvy roads | The curve check compared raw pixel numbers with no real-world meaning — a camera-resolution-dependent guess, not an actual road-curve radius | ✅ **Fixed in code.** ⚠️ Works better if you do the 1-time camera calibration in §1.5 (skippable — falls back safely without it). |
+| 5 | (found during review) `import data` crashed for some workflows | Unrelated pre-existing typo in `data/__init__.py`, from before Phase 3 | ✅ **Fixed in code, nothing to do.** |
+| 6 | **"Fake detections" on Indian videos** (main complaint) | This is the big one: our detector was only ever trained on KITTI (Germany) + COCO — it has **never seen** an autorickshaw, a cow on the road, or a hand-cart, so it either misses them or force-fits them into car/van/misc. Confirmed via research — this is a well-known, published domain-gap problem (IDD paper, WACV 2019), not a bug in our pipeline. | ⚠️ **Code is ready (15-class taxonomy + 2 India dataset converters), but NOT fixed yet on its own** — you need to download IDD and/or DriveIndia and re-run Job A (§3.4, Part 1) so the detector actually learns these classes. Nothing will change until that training runs. |
+| 7 | **"Lane detection doesn't work at all" on Indian videos** (main complaint) | CLRNet/UFLDv2 are trained on CULane, which assumes a continuous painted lane line to fit a curve to. Indian roads frequently have faded/absent/ignored markings — there's often nothing there for the model to find. No amount of retraining CLRNet fixes this. | ✅ **Fixed and ACTIVE automatically, nothing to do.** Added a "drivable-area" fallback (`models/drivable_area.py`) that segments the road surface instead of hunting for paint — it kicks in automatically whenever CLRNet finds fewer than 2 lines, using a built-in no-training CV method. Training it further (§3.4, Part 2) makes it more accurate but isn't required for it to work. |
 
-**Second round — Indian-road domain gap ("fake detections" + "lane detection doesn't work" on Indian videos):**
-this is a well-documented research problem, not a bug — see **Section 3.4 (PLAN C)** for the full explanation with paper citations, plus two new datasets (IDD, DriveIndia) and a drivable-area segmentation fallback that's already wired into `adas_final.py` with zero pipeline changes needed on your end.
+**In one line:** items 1-5 and 7 are done — pull the branch and they just
+work. Item 6 (fake detections on Indian classes) needs YOU to run the
+dataset downloads + a re-train in **Section 3.4 (PLAN C)** — the code can't
+fix a missing-data problem by itself, only training data can.
+
+**Prove it to yourself in 2 minutes, no GPU needed:**
+```bash
+python scripts/verify_adas_pipeline.py
+# Expect: ALL CHECKS PASSED (19/19)
+```
+
+Full technical detail on every row above (which file, exact diff reasoning,
+paper citations) is in **Section 3.4 (PLAN C)** and inline code comments —
+this table is the fast version.
 
 ---
 
