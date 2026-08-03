@@ -253,7 +253,57 @@ def test_overtaking():
 
 
 # --------------------------------------------------------------------------
-# 6. CLRNet coordinate-scaling regression test (no GPU/weights needed —
+# 6. Sanity filter: geometric size-consistency check that catches "detected
+#    something where nothing real is there" (billboards/hoardings/
+#    reflections a domain-shifted detector can hallucinate onto).
+# --------------------------------------------------------------------------
+
+def test_sanity_filter():
+    from inference.sanity_filter import SizeConsistencyFilter
+    from models.ipm import estimate_focal_length_px
+
+    fx = estimate_focal_length_px(image_width=1280)  # ~640px for 90 deg HFOV
+    check("sanity_filter: estimate_focal_length_px returns a sane positive value",
+          200 < fx < 2000, f"fx={fx}")
+
+    filt = SizeConsistencyFilter(focal_length_px=fx)
+    depth_map = np.full((480, 1280), 20.0, dtype=np.float32)  # uniform 20m depth
+
+    # Plausible real car: ~58px wide at 20m depth with fx~640 -> ~1.8m real width
+    plausible_car = FakeDet((100, 300, 158, 380), 0.8, 0, "car")
+    # Implausibly HUGE "car" (billboard-scale): 400px wide at the same 20m depth
+    huge_car = FakeDet((300, 300, 700, 380), 0.8, 0, "car")
+    # Implausibly TINY "car": 5px wide at 20m depth
+    tiny_car = FakeDet((800, 300, 805, 380), 0.8, 0, "car")
+    # Unbounded class ("misc") at the same huge size -- should NOT be rejected
+    huge_misc = FakeDet((900, 300, 1270, 380), 0.8, 10, "misc")
+
+    kept = filt.filter([plausible_car, huge_car, tiny_car, huge_misc], depth_map)
+    kept_names = [(d.class_name, d.bbox) for d in kept]
+
+    check("sanity_filter: plausible-size car is kept",
+          plausible_car in kept, f"kept={kept_names}")
+    check("sanity_filter: billboard-scale huge 'car' is rejected",
+          huge_car not in kept, f"kept={kept_names}")
+    check("sanity_filter: implausibly tiny 'car' is rejected",
+          tiny_car not in kept, f"kept={kept_names}")
+    check("sanity_filter: unbounded class ('misc') passes through regardless of size",
+          huge_misc in kept, f"kept={kept_names}")
+    check("sanity_filter: rejected_count tracks rejections by class",
+          filt.rejected_count.get("car", 0) == 2, f"rejected_count={filt.rejected_count}")
+
+    # Graceful degradation: no focal length / no depth map -> everything passes
+    filt_noop = SizeConsistencyFilter(focal_length_px=None)
+    kept_noop = filt_noop.filter([huge_car], depth_map)
+    check("sanity_filter: no-ops (passes everything) when focal_length_px is None",
+          huge_car in kept_noop)
+    kept_noop2 = filt.filter([huge_car], None)
+    check("sanity_filter: no-ops (passes everything) when depth_map is None",
+          huge_car in kept_noop2)
+
+
+# --------------------------------------------------------------------------
+# 7. CLRNet coordinate-scaling regression test (no GPU/weights needed —
 #    exercises the exact arithmetic that was buggy)
 # --------------------------------------------------------------------------
 
@@ -300,6 +350,7 @@ def main():
         ("IPM ground-plane curvature", test_ipm),
         ("Drivable-area fallback (unmarked-road lane substitute)", test_drivable_area),
         ("Overtaking decision rules", test_overtaking),
+        ("Sanity filter (phantom-detection geometric check)", test_sanity_filter),
         ("CLRNet coordinate-scaling regression", test_clrnet_coord_scaling),
     ]:
         print(f"\n--- {name} ---")

@@ -52,8 +52,12 @@ class ADASFinalPipeline:
     def __init__(self,
                  detector_weights: str = "runs/final/yolo11x_merged/weights/best.pt",
                  imgsz: int = 1280,
-                 depth_every_n: int = 2):
+                 depth_every_n: int = 2,
+                 conf_threshold: float = 0.35,
+                 kitti_calib_path: str | None = None):
         from ultralytics import YOLO
+
+        self.conf_threshold = conf_threshold
 
         w = Path(detector_weights)
         if not w.exists():
@@ -94,6 +98,22 @@ class ADASFinalPipeline:
                           if self.depth_model else None)
         self.depth_every_n = depth_every_n
 
+        # Geometric size-consistency filter — rejects detections on things
+        # that AREN'T actually there (billboards/hoardings/reflections a
+        # domain-shifted detector can hallucinate a "car"-shaped box onto),
+        # using the depth map we already compute for collision detection.
+        # See inference/sanity_filter.py for the full rationale. Focal
+        # length: exact from KITTI calib if you have it, else an approximate
+        # dashcam-HFOV estimate computed lazily from the first frame's width.
+        from inference.sanity_filter import SizeConsistencyFilter
+        from models.ipm import focal_length_px_from_kitti_calib, estimate_focal_length_px
+        self._estimate_focal_length_px = estimate_focal_length_px
+        focal_length_px = None
+        if kitti_calib_path:
+            focal_length_px = self._try(
+                lambda: focal_length_px_from_kitti_calib(kitti_calib_path))
+        self.sanity_filter = SizeConsistencyFilter(focal_length_px=focal_length_px)
+
         # Tracking
         from inference.tracker import ByteTrackWrapper
         self.tracker = self._try(ByteTrackWrapper)
@@ -112,7 +132,9 @@ class ADASFinalPipeline:
               f"drivable_area={'trained' if self.drivable_area and self.drivable_area.model else 'CV-fallback'}",
               f"depth={'Y' if self.depth_model else 'N'}",
               f"tracker={'Y' if self.tracker else 'N'}",
-              f"tl_state={'Y' if self.tl_classifier else 'HSV-fallback'}")
+              f"tl_state={'Y' if self.tl_classifier else 'HSV-fallback'}",
+              f"size_check={'KITTI-calibrated' if self.sanity_filter.focal_length_px and kitti_calib_path else ('estimated-fx (pending)' if self.depth_model else 'N (no depth)')}",
+              f"conf_threshold={self.conf_threshold}")
 
     @staticmethod
     def _try(factory):
@@ -135,9 +157,20 @@ class ADASFinalPipeline:
         proc = self.enhancer.maybe_enhance(frame, result.lighting)
 
         # 1. Detection
-        yolo_out = self.detector.predict(proc, imgsz=self.imgsz, conf=0.3,
+        yolo_out = self.detector.predict(proc, imgsz=self.imgsz,
+                                         conf=self.conf_threshold,
                                          verbose=False)[0]
         result.detections = self._to_detections(yolo_out)
+
+        # 1.5 Geometric size-consistency filter — catches "detected something
+        # where nothing real is there" (billboards/hoardings/reflections),
+        # using the depth map from the previous depth-computation cycle
+        # (self._last_depth; see inference/sanity_filter.py for why this is a
+        # cheap, no-extra-inference check). No-ops gracefully if depth/focal
+        # length aren't available yet (e.g. very first frame).
+        if self.sanity_filter.focal_length_px is None:
+            self.sanity_filter.focal_length_px = self._estimate_focal_length_px(frame.shape[1])
+        result.detections = self.sanity_filter.filter(result.detections, self._last_depth)
 
         # 2. Lanes + lane types
         if self.lanes_model:
@@ -283,9 +316,18 @@ def main():
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--weights", default="runs/final/yolo11x_merged/weights/best.pt")
     ap.add_argument("--log", default="decisions.jsonl")
+    ap.add_argument("--conf", type=float, default=0.35,
+                    help="Detection confidence threshold. Raise this (e.g. 0.45-0.5) "
+                         "if you're seeing phantom/false-positive detections on "
+                         "out-of-distribution footage — see KRISH_HANDOVER.md status table.")
+    ap.add_argument("--kitti_calib", default=None,
+                    help="Path to a KITTI calib_cam_to_cam.txt for exact focal length "
+                         "in the size-consistency filter. Omit to use an approximate "
+                         "estimate from the video's own resolution.")
     args = ap.parse_args()
 
-    pipe = ADASFinalPipeline(detector_weights=args.weights)
+    pipe = ADASFinalPipeline(detector_weights=args.weights, conf_threshold=args.conf,
+                             kitti_calib_path=args.kitti_calib)
 
     src = int(args.source) if args.source.isdigit() else args.source
     cap = cv2.VideoCapture(src)
@@ -310,6 +352,7 @@ def main():
                         "dist": round(a.distance_m, 1)}
                        for a in r.collision_alerts],
             "n_objects": len(r.tracks or r.detections),
+            "sanity_rejected_total": sum(pipe.sanity_filter.rejected_count.values()),
             "latency_ms": round(r.latency_ms, 1),
         }) + "\n")
 
@@ -330,6 +373,13 @@ def main():
         writer.release()
         print(f"Saved: {args.save}")
     print(f"Decision log: {args.log}")
+    if pipe.sanity_filter.rejected_count:
+        total = sum(pipe.sanity_filter.rejected_count.values())
+        print(f"\n[sanity_filter] Rejected {total} phantom/implausible-size "
+              f"detections this run: {dict(pipe.sanity_filter.rejected_count)}")
+        print("  If this number seems too high (rejecting real objects) or too "
+              "low (still seeing phantoms), tune --conf and/or check that "
+              "--kitti_calib is set for accurate focal length.")
 
 
 if __name__ == "__main__":
