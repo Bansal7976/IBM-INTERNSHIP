@@ -1,5 +1,5 @@
 #!/bin/bash
-# JOBS C + D + F — classifiers + full evaluation (1 GPU, ~5h total)
+# JOBS C + D + G + F — classifiers + drivable-area + full evaluation (1 GPU, ~6h total)
 # Run AFTER Jobs A and B finish.
 # Submit:  qsub training/pbs/aux_and_eval.pbs
 #PBS -N aux_and_eval
@@ -30,6 +30,16 @@ if [ -d data/bdd100k/labels ]; then
     python training/train_aux_classifiers.py train-lane
 else
     echo "[skip] BDD100K missing — Plan B uses the heuristic (KRISH_HANDOVER.md 3.3-B5)"
+fi
+
+echo "=== JOB G: drivable-area segmentation (India unmarked-road fix) ==="
+if [ -d data/drivable_binary ]; then
+    python training/train_drivable_area.py train --data data/drivable_binary \
+      --epochs 40 --batch 32
+else
+    echo "[skip] data/drivable_binary missing — run the 'prepare' step first, "
+    echo "       see KRISH_HANDOVER.md 'PLAN C' (needs IDD_Segmentation + the "
+    echo "       correct drivable-class ids from the AutoNUE devkit)"
 fi
 
 echo "=== JOB F: full evaluation suite ==="

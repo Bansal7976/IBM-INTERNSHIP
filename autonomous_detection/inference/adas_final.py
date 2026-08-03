@@ -37,6 +37,7 @@ class FrameResult:
     detections: list = field(default_factory=list)
     tracks: list = field(default_factory=list)
     lanes: object = None
+    lanes_source: str = "model"    # "model" | "drivable_area_fallback"
     lane_types: dict = field(default_factory=dict)
     lighting: str = "DAY"
     collision_alerts: list = field(default_factory=list)
@@ -60,10 +61,19 @@ class ADASFinalPipeline:
             detector_weights = "yolo11x.pt"
         self.detector = YOLO(detector_weights)
         self.imgsz = imgsz
+        wdir = PROJECT_ROOT / "weights"
 
-        # Lane detection (CLRNet -> UFLDv2 -> None)
+        # Lane detection (CLRNet -> UFLDv2 -> None), with a drivable-area
+        # segmentation fallback for roads with no usable painted markings
+        # (very common on Indian roads — CLRNet/UFLDv2 are CULane-trained
+        # and simply have nothing to fit a curve to there). See
+        # models/drivable_area.py for the full rationale.
         from models.lane_detector import load_lane_detector
+        from models.drivable_area import DrivableAreaSegmenter
         self.lanes_model = load_lane_detector("clrnet")
+        da_weights = wdir / "drivable_area.pth"
+        self.drivable_area = self._try(
+            lambda: DrivableAreaSegmenter(str(da_weights) if da_weights.exists() else None))
 
         # Auxiliary classifiers (optional weights)
         from models.aux_classifiers import (
@@ -71,7 +81,6 @@ class ADASFinalPipeline:
             classify_light_hsv, decide_traffic_light_action)
         self._decide_tl = decide_traffic_light_action
         self._hsv_fallback = classify_light_hsv
-        wdir = PROJECT_ROOT / "weights"
         self.tl_classifier = self._try(
             lambda: TrafficLightStateClassifier(str(wdir / "tl_state.pt")))
         self.lane_type_classifier = self._try(
@@ -99,7 +108,8 @@ class ADASFinalPipeline:
         self._frame_idx = 0
         self._last_depth = None
         print("[pipeline] Modules loaded:",
-              f"lanes={'Y' if self.lanes_model else 'N'}",
+              f"lanes={'Y' if self.lanes_model else 'N (drivable-area fallback only)'}",
+              f"drivable_area={'trained' if self.drivable_area and self.drivable_area.model else 'CV-fallback'}",
               f"depth={'Y' if self.depth_model else 'N'}",
               f"tracker={'Y' if self.tracker else 'N'}",
               f"tl_state={'Y' if self.tl_classifier else 'HSV-fallback'}")
@@ -135,6 +145,22 @@ class ADASFinalPipeline:
             if self.lane_type_classifier and result.lanes.polylines:
                 result.lane_types = self.lane_type_classifier.classify(
                     proc, result.lanes)
+
+        # Drivable-area fallback: CLRNet/UFLDv2 need painted lines to fit a
+        # curve through, so `len(polylines) < 2` is the normal outcome on
+        # roads with faded/absent/unfollowed markings (common on Indian
+        # roads — see models/drivable_area.py). Substitute a
+        # segmentation-derived corridor so collision.py's ego-path gating
+        # still has something better than the crude "central 40%" guess.
+        # lane_types stays empty here on purpose: overtaking.py's Rule 1
+        # already fails safe to NOT_POSSIBLE_SOLID_LINE without real
+        # lane-type info, which is the correct conservative behavior for a
+        # road we have no painted-marking legality info for.
+        if (result.lanes is None or len(result.lanes.polylines) < 2) and self.drivable_area:
+            fallback = self.drivable_area.segment_to_lane_result(proc)
+            if fallback is not None:
+                result.lanes = fallback
+                result.lanes_source = "drivable_area_fallback"
 
         # 3. Tracking
         if self.tracker:
@@ -201,11 +227,15 @@ class ADASFinalPipeline:
     def draw(self, frame: np.ndarray, r: FrameResult) -> np.ndarray:
         out = frame.copy()
 
-        # Lanes: green = dashed (overtake OK), red = solid
+        # Lanes: green = dashed (overtake OK), red = solid, yellow = drivable-
+        # area fallback (no real lane-type info -> overtaking stays conservative)
         if r.lanes is not None:
             for pl in r.lanes.polylines:
-                ltype = r.lane_types.get(id(pl), "unknown")
-                color = (0, 0, 255) if "solid" in ltype else (0, 255, 0)
+                if r.lanes_source == "drivable_area_fallback":
+                    color = (0, 220, 255)
+                else:
+                    ltype = r.lane_types.get(id(pl), "unknown")
+                    color = (0, 0, 255) if "solid" in ltype else (0, 255, 0)
                 pts = np.asarray(pl, dtype=np.int32).reshape(-1, 1, 2)
                 cv2.polylines(out, [pts], False, color, 3)
 
@@ -271,6 +301,7 @@ def main():
         radius_m = getattr(pipe.overtaking, "last_curve_radius_m", None)
         log.write(json.dumps({
             "frame": pipe._frame_idx, "lighting": r.lighting,
+            "lanes_source": r.lanes_source if r.lanes is not None else None,
             "traffic_light": r.traffic_light,
             "overtaking": r.overtaking.name if r.overtaking else None,
             "curve_radius_m": round(radius_m, 1) if radius_m else None,
