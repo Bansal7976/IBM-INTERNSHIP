@@ -84,7 +84,7 @@ synthetic data — no GPU, no weights, no dataset, seconds to run:
 python scripts/verify_adas_pipeline.py
 ```
 
-Expected output: `ALL CHECKS PASSED (14/14)`. If anything says `FAIL`, stop
+Expected output: `ALL CHECKS PASSED (19/19)`. If anything says `FAIL`, stop
 and fix it (or ping Vishal) before touching `qsub`/`sbatch` — it tells you
 exactly which rule broke and why. This script is also how the 3 bugs in the
 changelog above were caught, so it's a real regression net, not a formality.
