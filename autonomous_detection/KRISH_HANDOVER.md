@@ -26,18 +26,20 @@ command.
 | 3 | (found during review) Collision alerts sometimes fired for things nowhere near the car | A guard condition skipped the "which objects are actually in my lane" check whenever lane detection had no output for a frame | ✅ **Fixed in code, nothing to do.** |
 | 4 | Overtake "possible on this curve" felt arbitrary, especially on mountain/curvy roads | The curve check compared raw pixel numbers with no real-world meaning — a camera-resolution-dependent guess, not an actual road-curve radius | ✅ **Fixed in code.** ⚠️ Works better if you do the 1-time camera calibration in §1.5 (skippable — falls back safely without it). |
 | 5 | (found during review) `import data` crashed for some workflows | Unrelated pre-existing typo in `data/__init__.py`, from before Phase 3 | ✅ **Fixed in code, nothing to do.** |
-| 6 | **"Fake detections" on Indian videos** (main complaint) | This is the big one: our detector was only ever trained on KITTI (Germany) + COCO — it has **never seen** an autorickshaw, a cow on the road, or a hand-cart, so it either misses them or force-fits them into car/van/misc. Confirmed via research — this is a well-known, published domain-gap problem (IDD paper, WACV 2019), not a bug in our pipeline. | ⚠️ **Code is ready (15-class taxonomy + 2 India dataset converters), but NOT fixed yet on its own** — you need to download IDD and/or DriveIndia and re-run Job A (§3.4, Part 1) so the detector actually learns these classes. Nothing will change until that training runs. |
+| 6 | **Real objects misclassified on Indian videos** (an autorickshaw/cow/hand-cart gets called "car" or "misc") | Our detector was only ever trained on KITTI (Germany) + COCO — it has **never seen** an autorickshaw, a cow on the road, or a hand-cart, so it force-fits them into the nearest class it knows. Confirmed via research — this is a well-known, published domain-gap problem (IDD paper, WACV 2019), not a bug in our pipeline. | ⚠️ **Code is ready (15-class taxonomy + 2 India dataset converters), but NOT fixed yet on its own** — you need to download IDD and/or DriveIndia and re-run Job A (§3.4, Part 1) so the detector actually learns these classes. Nothing will change until that training runs. |
 | 7 | **"Lane detection doesn't work at all" on Indian videos** (main complaint) | CLRNet/UFLDv2 are trained on CULane, which assumes a continuous painted lane line to fit a curve to. Indian roads frequently have faded/absent/ignored markings — there's often nothing there for the model to find. No amount of retraining CLRNet fixes this. | ✅ **Fixed and ACTIVE automatically, nothing to do.** Added a "drivable-area" fallback (`models/drivable_area.py`) that segments the road surface instead of hunting for paint — it kicks in automatically whenever CLRNet finds fewer than 2 lines, using a built-in no-training CV method. Training it further (§3.4, Part 2) makes it more accurate but isn't required for it to work. |
+| 8 | **"Something is detected where there's literally nothing"** — a different failure mode from #6: not a misclassified real object, a box on EMPTY road/background (billboard, hoarding, reflection, glare, shopfront poster) | This is called a "phantom"/"hallucinated" detection in the safety literature. A detector shown out-of-distribution scenes gets less reliable at knowing when it's actually confident — a car-shaped billboard/poster can trigger a genuine-looking box even though there's no real 3D car there. | ✅ **Fixed and ACTIVE automatically, nothing to do**, plus one dial you can tune. Added a geometric size-consistency check (`inference/sanity_filter.py`): using the depth map we already compute, it works out the REAL-WORLD size implied by each box's pixel-width + distance (pinhole camera math), and throws out anything wildly too big/small for its class (a "car" box that would have to be 15m wide to be real, at its measured distance, isn't a real car). Also made the confidence threshold tunable: `--conf 0.45` (up from default 0.35) makes detection stricter overall if you're still seeing too many phantoms — see §3.4 Part 3 below. |
 
-**In one line:** items 1-5 and 7 are done — pull the branch and they just
-work. Item 6 (fake detections on Indian classes) needs YOU to run the
-dataset downloads + a re-train in **Section 3.4 (PLAN C)** — the code can't
-fix a missing-data problem by itself, only training data can.
+**In one line:** items 1-5, 7, and 8 are done — pull the branch and they
+just work (item 8 has an optional `--conf` dial to tune further). Item 6
+(misclassified Indian-specific objects) needs YOU to run the dataset
+downloads + a re-train in **Section 3.4 (PLAN C)** — the code can't fix a
+missing-training-data problem by itself, only real training data can.
 
 **Prove it to yourself in 2 minutes, no GPU needed:**
 ```bash
 python scripts/verify_adas_pipeline.py
-# Expect: ALL CHECKS PASSED (19/19)
+# Expect: ALL CHECKS PASSED (27/27)
 ```
 
 Full technical detail on every row above (which file, exact diff reasoning,
@@ -105,7 +107,7 @@ synthetic data — no GPU, no weights, no dataset, seconds to run:
 python scripts/verify_adas_pipeline.py
 ```
 
-Expected output: `ALL CHECKS PASSED (19/19)`. If anything says `FAIL`, stop
+Expected output: `ALL CHECKS PASSED (27/27)`. If anything says `FAIL`, stop
 and fix it (or ping Vishal) before touching `qsub`/`sbatch` — it tells you
 exactly which rule broke and why. This script is also how the 3 bugs in the
 changelog above were caught, so it's a real regression net, not a formality.
@@ -145,7 +147,8 @@ autonomous_detection/
 │   ├── tracker.py           ✅ TESTED — ByteTrack-style tracking + velocity
 │   ├── collision.py         TTC collision detection + Depth Anything V2 wrapper
 │   ├── overtaking.py        5-rule overtaking decision (possible/not possible)
-│   └── night_enhance.py     Day/night classifier + Zero-DCE++ (CLAHE fallback)
+│   ├── night_enhance.py     Day/night classifier + Zero-DCE++ (CLAHE fallback)
+│   └── sanity_filter.py     NEW — phantom-detection geometric size check (PLAN C, §3.4 Part 3)
 ├── models/
 │   ├── lane_detector.py     CLRNet + UFLDv2 wrappers (lane polylines)
 │   ├── aux_classifiers.py   Traffic-light state + lane-type (solid/dashed)
@@ -436,6 +439,51 @@ of nothing.
 **Verify it worked:** `python scripts/verify_adas_pipeline.py` includes
 regression tests for the drivable-area fallback (finds a corridor on a
 synthetic unmarked-road image, both with and without trained weights).
+
+**Part 3 — phantom/hallucinated detections (fixes "something is detected
+where there's literally nothing").** This is a DIFFERENT problem from Part
+1 — it's not a real object getting the wrong class label, it's a box drawn
+on empty road, a billboard, a reflection, or glare. This is a documented
+failure mode in AV safety research, sometimes literally called a
+"hallucination" (see the PhantomPerception hallucination-injection safety
+framework, [arxiv.org/html/2510.07749v1](https://arxiv.org/html/2510.07749v1)) —
+out-of-distribution scenes make a detector's confidence scores less
+trustworthy, so it fires on things that resemble a class without actually
+being a 3D instance of it.
+
+The fix (`inference/sanity_filter.py`) is a geometric consistency check —
+a standard technique from monocular 3D detection research (see "Exploring
+Geometric Consistency for Monocular 3D Object Detection",
+[arxiv.org/abs/2104.05858](https://arxiv.org/abs/2104.05858)): using the
+depth map already computed for collision detection, work out how wide the
+detected object would have to be in the REAL world to produce that
+pixel-width box at that measured distance (basic pinhole camera math), and
+reject anything wildly outside a generous plausible range for its class. A
+billboard "car" or a reflection doesn't have the depth profile of an actual
+3.5m-wide 3D object at its apparent size, so this catches it.
+
+This runs **automatically, nothing to configure** — but two dials help if
+you're still seeing too many (or too few) rejections:
+
+```bash
+# Stricter overall confidence (fewer detections attempted in the first place):
+python inference/adas_final.py --source video.mp4 --conf 0.45   # default is 0.35
+
+# More ACCURATE size-consistency filtering (uses real camera geometry
+# instead of the ~90° HFOV guess it falls back to):
+python inference/adas_final.py --source video.mp4 \
+  --kitti_calib data/kitti/training/calib/000000.txt   # any KITTI calib_cam_to_cam.txt-style file
+```
+
+At the end of every run, `adas_final.py` prints how many detections got
+rejected and for which classes — if that number looks way too high (you
+suspect it's rejecting real objects), raise `margin` in
+`inference/sanity_filter.py`'s `SizeConsistencyFilter`; if you're still
+seeing obvious phantoms, tighten it or raise `--conf`.
+
+**Verify it worked:** `scripts/verify_adas_pipeline.py` includes tests
+proving a billboard-scale "car" gets rejected while a normal-sized one and
+unbounded classes (animal/misc/etc.) pass through untouched.
 
 ---
 

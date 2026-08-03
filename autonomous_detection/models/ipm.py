@@ -196,6 +196,27 @@ def _parse_kitti_P2(calib_path: str) -> np.ndarray:
     raise ValueError(f"No P_rect_02/P2 line found in {calib_path}")
 
 
+def focal_length_px_from_kitti_calib(calib_cam_to_cam_path: str) -> float:
+    """Exact horizontal focal length (pixels) from KITTI's own calibration —
+    used by inference/sanity_filter.py's geometric size-consistency check."""
+    return float(_parse_kitti_P2(calib_cam_to_cam_path)[0, 0])
+
+
+def estimate_focal_length_px(image_width: int, assumed_hfov_deg: float = 90.0) -> float:
+    """Fallback focal-length estimate for footage with no camera calibration
+    file (generic dashcam video). Assumes a horizontal field-of-view typical
+    of forward-facing dashcams/ADAS cameras (~90°) and inverts the pinhole
+    projection equation:  fx = width / (2 * tan(HFOV/2)).
+
+    This is deliberately approximate — real calibration (KITTI's P2, or a
+    manual IPM calibration, see `calibrate()` below) is always preferable
+    when available. It's accurate enough for the size-consistency SANITY
+    check in sanity_filter.py, which only needs to catch objects that are
+    wildly (2x+) too big/small for their measured depth, not sub-10% precision.
+    """
+    return image_width / (2.0 * np.tan(np.deg2rad(assumed_hfov_deg) / 2.0))
+
+
 # Real-world curve-radius bands for interpreting the number in reports/HUD.
 # Sources: AASHTO Green Book / IRC:73-1980 minimum horizontal curve radius
 # tables, rounded to the nearest 10 m for readability.
