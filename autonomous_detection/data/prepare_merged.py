@@ -1,12 +1,24 @@
-"""Merge KITTI + BDD100K (+ optional nuScenes) into one unified YOLO dataset.
+"""Merge KITTI + BDD100K + IDD + DriveIndia (+ optional nuScenes/LISA) into
+one unified YOLO dataset.
 
-Unified 11-class map:
+Unified 15-class map (11 original + 4 India-specific, added to fix the
+domain gap documented in the IDD paper — arxiv.org/abs/1811.10200 — and
+DriveIndia — arxiv.org/abs/2507.19912 — where KITTI/CULane-trained models
+misclassify or completely miss autorickshaws, animals, and handcarts/
+tractors/tankers that don't exist in KITTI's 8-class taxonomy at all):
     0 car  1 truck  2 bus  3 van  4 pedestrian  5 cyclist
     6 motorcycle  7 tram  8 traffic_light  9 traffic_sign  10 misc
+    11 autorickshaw  12 animal  13 rider  14 vehicle_fallback
+       (rider = person ON a bicycle/motorcycle, distinct from `cyclist`
+        which some sources use for the bicycle itself; vehicle_fallback =
+        IDD's open-world bucket for street cart / tractor / water tanker /
+        excavator — extremely common on Indian roads, absent from KITTI)
 
 Prerequisites:
-    python data/prepare_kitti.py    --data_root data/kitti       (already done)
-    python data/prepare_bdd100k.py  --data_root data/bdd100k
+    python data/prepare_kitti.py      --data_root data/kitti       (already done)
+    python data/prepare_bdd100k.py    --data_root data/bdd100k
+    python data/prepare_idd.py        --data_root data/IDD_Detection
+    python data/prepare_driveindia.py --data_root data/DriveIndia
 
 Usage:
     python data/prepare_merged.py --out data/merged_yolo
@@ -22,7 +34,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-# KITTI's original 8 classes (ids from kitti_yolo) -> unified 11-class ids
+# KITTI's original 8 classes (ids from kitti_yolo) -> unified 15-class ids
 KITTI_ID_TO_UNIFIED = {
     0: 0,   # Car -> car
     1: 3,   # Van -> van
@@ -37,6 +49,7 @@ KITTI_ID_TO_UNIFIED = {
 UNIFIED_NAMES = {
     0: "car", 1: "truck", 2: "bus", 3: "van", 4: "pedestrian", 5: "cyclist",
     6: "motorcycle", 7: "tram", 8: "traffic_light", 9: "traffic_sign", 10: "misc",
+    11: "autorickshaw", 12: "animal", 13: "rider", 14: "vehicle_fallback",
 }
 
 
@@ -102,6 +115,11 @@ def main():
     ap.add_argument("--nuscenes", default="data/nuscenes_yolo")
     ap.add_argument("--lisa", default="data/lisa_yolo",
                     help="LISA traffic-light YOLO dir (fallback when no BDD100K)")
+    ap.add_argument("--idd", default="data/idd_yolo",
+                    help="IDD Detection converted via data/prepare_idd.py — "
+                         "fixes fake detections on Indian-specific classes")
+    ap.add_argument("--driveindia", default="data/driveindia_yolo",
+                    help="DriveIndia converted via data/prepare_driveindia.py")
     ap.add_argument("--out", default="data/merged_yolo")
     args = ap.parse_args()
 
@@ -115,18 +133,28 @@ def main():
             if Path(args.nuscenes).exists() else 0
         n_lisa = add_source(Path(args.lisa), out, split, "lisa", None) \
             if Path(args.lisa).exists() else 0
-        totals[split] = (n_kitti, n_bdd, n_nusc, n_lisa)
+        n_idd = add_source(Path(args.idd), out, split, "idd", None) \
+            if Path(args.idd).exists() else 0
+        n_di = add_source(Path(args.driveindia), out, split, "di", None) \
+            if Path(args.driveindia).exists() else 0
+        totals[split] = (n_kitti, n_bdd, n_nusc, n_lisa, n_idd, n_di)
 
     names = "\n".join(f"  {k}: {v}" for k, v in UNIFIED_NAMES.items())
     (out / "merged.yaml").write_text(
-        f"# Merged KITTI + BDD100K (+nuScenes), unified 11 classes\n"
+        f"# Merged KITTI + BDD100K + IDD + DriveIndia (+nuScenes/LISA), "
+        f"unified {len(UNIFIED_NAMES)} classes\n"
         f"path: {out.resolve()}\n"
         f"train: train/images\nval: val/images\nnames:\n{names}\n")
 
     print("\n=== MERGED DATASET ===")
-    for split, (k, b, n, li) in totals.items():
+    for split, (k, b, n, li, idd, di) in totals.items():
         print(f"{split}: kitti={k}  bdd100k={b}  nuscenes={n}  lisa={li}  "
-              f"total={k + b + n + li}")
+              f"idd={idd}  driveindia={di}  total={k + b + n + li + idd + di}")
+        if idd == 0 and di == 0:
+            print("  [WARNING] No India-specific data merged (idd/driveindia "
+                  "both missing) — autorickshaw/animal/rider/vehicle_fallback "
+                  "classes will have ZERO training examples. See "
+                  "KRISH_HANDOVER.md 'PLAN C' before training for Indian roads.")
     print(f"Config: {out / 'merged.yaml'}")
     print("\nTrain with:")
     print("  yolo detect train model=yolo11x.pt data="

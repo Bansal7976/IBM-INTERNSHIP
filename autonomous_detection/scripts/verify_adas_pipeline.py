@@ -161,7 +161,48 @@ def test_ipm():
 
 
 # --------------------------------------------------------------------------
-# 4. Overtaking: each rule independently blocks POSSIBLE
+# 4. Drivable-area fallback: finds a corridor with zero weights (CV-only
+#    path) — this is the fix for lane detection failing on roads with no
+#    painted markings (common on Indian roads; CLRNet/UFLDv2 are CULane-
+#    trained and have nothing to fit a curve to there).
+# --------------------------------------------------------------------------
+
+def test_drivable_area():
+    from models.drivable_area import DrivableAreaSegmenter
+
+    h, w = 200, 300
+    frame = np.zeros((h, w, 3), dtype=np.uint8)
+    frame[:, :] = (40, 120, 40)          # "grass/background" everywhere
+    frame[140:h, 50:250] = (90, 90, 90)  # a gray "road" strip at the bottom
+
+    seg = DrivableAreaSegmenter(weights=None)  # forces the classical CV path
+    check("drivable-area: falls back to classical CV when no weights given",
+          seg.model is None)
+
+    mask = seg.segment_mask(frame)
+    road_pixel_correct = bool(mask[190, 150] > 0)      # inside the road strip
+    background_pixel_correct = bool(mask[20, 20] == 0)  # inside the background
+    check("drivable-area: classical CV mask marks the road strip as drivable",
+          road_pixel_correct)
+    check("drivable-area: classical CV mask does NOT mark the background as drivable",
+          background_pixel_correct)
+
+    lane_result = seg.segment_to_lane_result(frame)
+    check("drivable-area: produces a usable LaneResult (>=2 polylines) from "
+          "an unmarked synthetic road",
+          lane_result is not None and len(lane_result.polylines) >= 2,
+          f"got {lane_result}")
+    if lane_result is not None:
+        left_x = float(np.asarray(lane_result.polylines[0])[:, 0].mean())
+        right_x = float(np.asarray(lane_result.polylines[1])[:, 0].mean())
+        check("drivable-area: left/right boundaries roughly match the "
+              "synthetic road edges (~50px and ~250px)",
+              abs(left_x - 50) < 20 and abs(right_x - 250) < 20,
+              f"left_x={left_x}, right_x={right_x}")
+
+
+# --------------------------------------------------------------------------
+# 5. Overtaking: each rule independently blocks POSSIBLE
 # --------------------------------------------------------------------------
 
 def test_overtaking():
@@ -212,7 +253,7 @@ def test_overtaking():
 
 
 # --------------------------------------------------------------------------
-# 5. CLRNet coordinate-scaling regression test (no GPU/weights needed —
+# 6. CLRNet coordinate-scaling regression test (no GPU/weights needed —
 #    exercises the exact arithmetic that was buggy)
 # --------------------------------------------------------------------------
 
@@ -257,6 +298,7 @@ def main():
         ("Tracker", test_tracker),
         ("Collision / TTC", test_collision),
         ("IPM ground-plane curvature", test_ipm),
+        ("Drivable-area fallback (unmarked-road lane substitute)", test_drivable_area),
         ("Overtaking decision rules", test_overtaking),
         ("CLRNet coordinate-scaling regression", test_clrnet_coord_scaling),
     ]:

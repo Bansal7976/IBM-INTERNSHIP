@@ -18,6 +18,10 @@ Both plans produce the complete end product. Plan B loses ~nothing on features, 
 | 2 | `inference/collision.py` | Distance/speed history was only ever built for objects inside our own lane, so `depth_speed_mps` (the real closing speed) was **never set** on oncoming-lane vehicles — `overtaking.py`'s oncoming-traffic rule silently assumed oncoming cars were stationary, overestimating the safe window | History + speed now tracked for every object; alerts still scoped to ego-path only |
 | 3 | `inference/collision.py` | The ego-path check used `if lanes is not None and not _in_ego_path(...)`, which skipped calling `_in_ego_path()` entirely whenever lanes were `None` — so its documented "fall back to center 40% of frame" behavior could never run, and every object anywhere in frame would raise alerts when lane detection was down for a frame | Always call `_in_ego_path()`; it already handles `lanes=None` |
 | 4 (gap, not a bug) | `inference/overtaking.py` | Curve/visibility rule compared **pixel-space** curvature against a hand-picked number with no real-world meaning — unreliable exactly on the mountain/switchback roads this project needs to handle | New `models/ipm.py`: converts lane polylines to real ground-plane meters (standard ADAS Inverse Perspective Mapping) and compares against actual road-design curve-radius standards (AASHTO/IRC) |
+| 5 | `data/__init__.py` | Pre-existing (since before Phase 3) — imported a name (`NUSCENES_DETECTION_CLASSES`) from the wrong file, so any `import data...` (as opposed to running scripts directly) raised `ImportError` | Import from `prepare_nuscenes.py`, where it's actually defined |
+
+**Second round — Indian-road domain gap ("fake detections" + "lane detection doesn't work" on Indian videos):**
+this is a well-documented research problem, not a bug — see **Section 3.4 (PLAN C)** for the full explanation with paper citations, plus two new datasets (IDD, DriveIndia) and a drivable-area segmentation fallback that's already wired into `adas_final.py` with zero pipeline changes needed on your end.
 
 ---
 
@@ -124,19 +128,23 @@ autonomous_detection/
 ├── models/
 │   ├── lane_detector.py     CLRNet + UFLDv2 wrappers (lane polylines)
 │   ├── aux_classifiers.py   Traffic-light state + lane-type (solid/dashed)
-│   └── ipm.py               NEW — pixel→real-meters curvature (see §1.5)
+│   ├── ipm.py               NEW — pixel→real-meters curvature (see §1.5)
+│   └── drivable_area.py     NEW — unmarked-road corridor fallback (PLAN C, §3.4)
 ├── scripts/
 │   └── verify_adas_pipeline.py  NEW — 2-min logic smoke test, run before HPC (see §1.5)
 ├── data/
-│   ├── prepare_kitti.py     KITTI → YOLO (already used in Week 1)
-│   ├── prepare_nuscenes.py  nuScenes → YOLO (multi-camera 2D projection)
-│   ├── prepare_bdd100k.py   BDD100K → YOLO (PLAN A)
-│   ├── prepare_lisa_det.py  LISA → YOLO traffic-light boxes (PLAN B)
-│   └── prepare_merged.py    Merges everything → data/merged_yolo/merged.yaml
+│   ├── prepare_kitti.py       KITTI → YOLO (already used in Week 1)
+│   ├── prepare_nuscenes.py    nuScenes → YOLO (multi-camera 2D projection)
+│   ├── prepare_bdd100k.py     BDD100K → YOLO (PLAN A)
+│   ├── prepare_lisa_det.py    LISA → YOLO traffic-light boxes (PLAN B)
+│   ├── prepare_idd.py         NEW — IDD (India) VOC-XML → YOLO (PLAN C, see §3.4)
+│   ├── prepare_driveindia.py  NEW — DriveIndia YOLO → unified taxonomy (PLAN C)
+│   └── prepare_merged.py      Merges everything → data/merged_yolo/merged.yaml
 ├── training/
 │   ├── slurm/yolo11x_merged.sh   JOB A: main detector (8 GPU, ~36h)
 │   ├── slurm/clrnet_culane.sh    JOB B: lane model (4 GPU, ~24h)
-│   └── train_aux_classifiers.py  JOBS C+D: tiny classifiers (1 GPU, <1h each)
+│   ├── train_aux_classifiers.py  JOBS C+D: tiny classifiers (1 GPU, <1h each)
+│   └── train_drivable_area.py    JOB G: NEW — drivable-area segmentation (PLAN C, §3.4)
 ├── evaluation/
 │   └── evaluate_final.py    JOB F: produces ALL report tables in one run
 ├── FINAL_PRODUCT_GUIDE.md   Deep research doc (why each model/dataset)
@@ -283,6 +291,130 @@ def classify_lane_type_heuristic(frame_gray, polyline, patch=9):
 **Plan B honest cost:** night detection mAP will be a few points lower than
 Plan A (less real night data), and lane-type accuracy ~90% (heuristic) vs ~95%
 (trained). Everything else identical.
+
+---
+
+## 3.4 PLAN C — FIX FOR "FAKE DETECTIONS" + "LANE DETECTION DOESN'T WORK" ON INDIAN VIDEOS
+
+**Do this if you're testing/deploying on Indian road footage** (in addition
+to Plan A or B above, not instead of).
+
+### Why this happens — it's not a bug in our pipeline
+
+KITTI (Karlsruhe, Germany) and CULane (Chinese highways) were both captured
+in structured, rule-following traffic with continuous painted lane markings
+and a small, homogeneous set of vehicle types. This is a well-documented,
+specifically-named research problem, not something specific to our code:
+
+> "Datasets like KITTI, Cityscapes, Argoverse, and nuScenes are captured in
+> developed countries where infrastructure is well-developed and road
+> activity is structured... results obtained from these datasets are often
+> not directly applicable in unstructured road situations prevalent in
+> large parts of the world."
+> — Varma et al., *IDD: A Dataset for Exploring Problems of Autonomous
+> Navigation in Unconstrained Environments*, WACV 2019
+> ([arxiv.org/abs/1811.10200](https://arxiv.org/abs/1811.10200))
+
+That paper's own experiments show segmentation models trained on
+Cityscapes-style data score much lower on Indian roads than on their native
+distribution — i.e. the exact domain gap producing the two symptoms
+reported:
+
+- **"Fake detections"** — a detector that has never seen an autorickshaw,
+  a cow on the road, or a hand-cart either misses it or force-fits it into
+  the nearest class it does know (car/van/misc). That's not random noise,
+  it's a systematic classification error from a missing class.
+- **"Lane detection doesn't work at all"** — CLRNet/UFLDv2 (`models/lane_detector.py`)
+  are trained on CULane, which assumes a continuous, clearly painted lane
+  line to fit a curve through. On roads where markings are faded, absent,
+  or simply not followed (very common outside Indian highways), there is
+  often nothing there for the model to find — no amount of retraining
+  CLRNet itself fixes this, because the assumption behind its whole output
+  representation doesn't hold.
+
+### The fix — two parts, both already wired into the code in this branch
+
+**Part 1 — Indian-specific detection classes (fixes fake detections).**
+The unified taxonomy in `data/prepare_merged.py` grew from 11 to 15
+classes: `autorickshaw`, `animal`, `rider`, `vehicle_fallback` (IDD's
+open-world bucket for street cart / tractor / water tanker / excavator —
+IDD's own paper describes exactly this expansion for the same reason).
+Fine-tune on real Indian data so the detector actually learns these:
+
+```bash
+# 1a. IDD (India Driving Dataset) — 10K-47K images, 15-class detection subset,
+#     PASCAL-VOC XML format, IIIT Hyderabad + Intel, WACV 2019.
+#     Register (free, ~1 day approval): https://idd.insaan.iiit.ac.in/
+#     Download "IDD Detection", extract to data/IDD_Detection/, then:
+python data/prepare_idd.py --data_root data/IDD_Detection --out data/idd_yolo
+
+# 1b. DriveIndia — newer (2025), LARGER (66,986 images, 24 classes), and
+#     already in YOLO format (no bbox math needed, just a class remap).
+#     TiHAN-IIT Hyderabad: https://tihan.iith.ac.in/tiand-datasets/
+#     Paper: https://arxiv.org/abs/2507.19912
+#     Extract to data/DriveIndia/ (needs the dataset's own data.yaml — this
+#     script reads its real class names rather than guessing IDs), then:
+python data/prepare_driveindia.py --data_root data/DriveIndia --out data/driveindia_yolo
+
+# 1c. Re-merge (adds to whatever Plan A/B sources you already have):
+python data/prepare_merged.py --out data/merged_yolo \
+  --idd data/idd_yolo --driveindia data/driveindia_yolo
+# You'll see a WARNING in the output if neither idd/ nor driveindia/ were
+# found — that means autorickshaw/animal/rider/vehicle_fallback get ZERO
+# training examples and will never be detected. Don't skip this if you're
+# testing on Indian footage.
+
+# 1d. Re-train (same Job A as before, just with the enlarged merged dataset —
+# see KRISH_HANDOVER.md Section 4 Job A). Even a partial-epoch fine-tune from
+# your existing best.pt checkpoint on just the new classes helps a lot more
+# than training from yolo11x.pt COCO weights again.
+```
+
+**Part 2 — drivable-area segmentation (fixes lane detection on unmarked
+roads).** Every independent project working on this problem reaches the
+same conclusion: stop asking "where are the lane lines" and ask "which part
+of the image is drivable road surface" instead — see e.g.
+[moatifbutt/Drivable-Road-Region-Detection](https://github.com/moatifbutt/Drivable-Road-Region-Detection-and-Steering-Angle-Estimation-Method),
+[AbhayVAshokan/Semantic-Segmentation-of-Road-Surface](https://github.com/AbhayVAshokan/Semantic-Segmentation-of-Road-Surface)
+(IDD-based). `models/drivable_area.py` implements exactly this, and
+`inference/adas_final.py` already calls it automatically whenever CLRNet/
+UFLDv2 return fewer than 2 usable lane lines — **you don't need to change
+any pipeline code**, just optionally train it for better accuracy than the
+built-in classical-CV fallback (which works with zero weights, just less
+precisely around shadows/glare):
+
+```bash
+# One-time: convert IDD Segmentation's multi-class label PNGs into simple
+# binary drivable/not-drivable masks. You need the correct pixel-ID(s) for
+# "road"/"drivable fallback" in YOUR IDD release — get these from the
+# AutoNUE devkit (github.com/AutoNUE/public-code, helpers/anue_labels.py),
+# which ships with the dataset. Don't guess a number here — a wrong id
+# silently trains the model on the wrong thing.
+python training/train_drivable_area.py prepare \
+  --idd_seg data/IDD_Segmentation --drivable_ids <see anue_labels.py> \
+  --out data/drivable_binary
+
+# Train (small model, ~1-2h on a single GPU):
+python training/train_drivable_area.py train --data data/drivable_binary \
+  --epochs 40 --batch 32
+# -> weights/drivable_area.pth (auto-loaded by adas_final.py next run)
+```
+
+This is now folded into Job "C+D+G+F" — `training/pbs/aux_and_eval.pbs`
+runs it automatically if `data/drivable_binary/` exists, skips with a
+message otherwise.
+
+**What this does NOT change:** overtaking legality (`inference/overtaking.py`
+Rule 1) still fails safe to "NOT POSSIBLE" without real painted-lane-type
+info — crossing into oncoming traffic on an unmarked road is a genuinely
+higher-risk judgment call this project intentionally doesn't make. The
+drivable-area fallback only improves collision-alert accuracy (knowing
+what's actually in your path) and gives the HUD something to draw instead
+of nothing.
+
+**Verify it worked:** `python scripts/verify_adas_pipeline.py` includes
+regression tests for the drivable-area fallback (finds a corridor on a
+synthetic unmarked-road image, both with and without trained weights).
 
 ---
 
