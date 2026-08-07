@@ -53,6 +53,8 @@ class CLRNetWrapper:
         repo = PROJECT_ROOT / "external" / "CLRNet"
         sys.path.insert(0, str(repo))
         import torch
+        # Patch mmcv 2.x to expose the 1.x API that CLRNet expects
+        from models import mmcv_compat  # noqa: F401  (side-effects only)
         from clrnet.models.registry import build_net
         from clrnet.utils.config import Config
 
@@ -61,7 +63,11 @@ class CLRNetWrapper:
         self.device = device if torch.cuda.is_available() else "cpu"
         self.net = build_net(self.cfg).to(self.device).eval()
         state = torch.load(weights, map_location=self.device)
-        self.net.load_state_dict(state["net"] if "net" in state else state)
+        raw = state["net"] if "net" in state else state
+        # Strip DataParallel 'module.' prefix saved by multi-GPU training
+        if any(k.startswith("module.") for k in raw):
+            raw = {k[len("module."):]: v for k, v in raw.items()}
+        self.net.load_state_dict(raw, strict=False)
         self.input_w = self.cfg.img_w
         self.input_h = self.cfg.img_h
         self.cut_height = getattr(self.cfg, "cut_height", 270)
