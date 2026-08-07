@@ -120,6 +120,10 @@ def main():
                          "fixes fake detections on Indian-specific classes")
     ap.add_argument("--driveindia", default="data/driveindia_yolo",
                     help="DriveIndia converted via data/prepare_driveindia.py")
+    ap.add_argument("--uvh26", default="data/uvh26_yolo",
+                    help="UVH-26 (IISc, Nov 2025) converted via data/prepare_uvh26.py — "
+                         "26.6K real Bengaluru traffic-camera images, largest/freshest "
+                         "India-specific source")
     ap.add_argument("--out", default="data/merged_yolo")
     args = ap.parse_args()
 
@@ -137,22 +141,25 @@ def main():
             if Path(args.idd).exists() else 0
         n_di = add_source(Path(args.driveindia), out, split, "di", None) \
             if Path(args.driveindia).exists() else 0
-        totals[split] = (n_kitti, n_bdd, n_nusc, n_lisa, n_idd, n_di)
+        n_uvh = add_source(Path(args.uvh26), out, split, "uvh", None) \
+            if Path(args.uvh26).exists() else 0
+        totals[split] = (n_kitti, n_bdd, n_nusc, n_lisa, n_idd, n_di, n_uvh)
 
     names = "\n".join(f"  {k}: {v}" for k, v in UNIFIED_NAMES.items())
     (out / "merged.yaml").write_text(
-        f"# Merged KITTI + BDD100K + IDD + DriveIndia (+nuScenes/LISA), "
+        f"# Merged KITTI + BDD100K + IDD + DriveIndia + UVH-26 (+nuScenes/LISA), "
         f"unified {len(UNIFIED_NAMES)} classes\n"
         f"path: {out.resolve()}\n"
         f"train: train/images\nval: val/images\nnames:\n{names}\n")
 
     print("\n=== MERGED DATASET ===")
-    for split, (k, b, n, li, idd, di) in totals.items():
+    for split, (k, b, n, li, idd, di, uvh) in totals.items():
         print(f"{split}: kitti={k}  bdd100k={b}  nuscenes={n}  lisa={li}  "
-              f"idd={idd}  driveindia={di}  total={k + b + n + li + idd + di}")
-        if idd == 0 and di == 0:
-            print("  [WARNING] No India-specific data merged (idd/driveindia "
-                  "both missing) — autorickshaw/animal/rider/vehicle_fallback "
+              f"idd={idd}  driveindia={di}  uvh26={uvh}  "
+              f"total={k + b + n + li + idd + di + uvh}")
+        if idd == 0 and di == 0 and uvh == 0:
+            print("  [WARNING] No India-specific data merged (idd/driveindia/uvh26 "
+                  "all missing) — autorickshaw/animal/rider/vehicle_fallback "
                   "classes will have ZERO training examples. See "
                   "KRISH_HANDOVER.md 'PLAN C' before training for Indian roads.")
     print(f"Config: {out / 'merged.yaml'}")

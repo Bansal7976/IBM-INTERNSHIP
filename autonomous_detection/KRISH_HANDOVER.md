@@ -163,6 +163,7 @@ autonomous_detection/
 │   ├── prepare_lisa_det.py    LISA → YOLO traffic-light boxes (PLAN B)
 │   ├── prepare_idd.py         NEW — IDD (India) VOC-XML → YOLO (PLAN C, see §3.4)
 │   ├── prepare_driveindia.py  NEW — DriveIndia YOLO → unified taxonomy (PLAN C)
+│   ├── prepare_uvh26.py       NEW — UVH-26 (IISc) COCO-JSON → YOLO (PLAN C, §3.3.5)
 │   └── prepare_merged.py      Merges everything → data/merged_yolo/merged.yaml
 ├── training/
 │   ├── slurm/yolo11x_merged.sh   JOB A: main detector (8 GPU, ~36h)
@@ -318,6 +319,39 @@ Plan A (less real night data), and lane-type accuracy ~90% (heuristic) vs ~95%
 
 ---
 
+## 3.3.5 HOW WE COMPARE TO OTHER PUBLIC INDIAN-ROAD PROJECTS (researched on GitHub/arXiv)
+
+Honest answer to "kisi aur ne kaise kiya, humse better kaise hai": on
+**architecture/scope**, nobody found is doing more than this project — full
+detection + tracking + lanes + depth/TTC + overtaking decision + night
+enhancement in one pipeline is broader than every comparable public repo.
+On **actually having trained on Indian data and measured the result**, they
+are ahead of us right now, because they've run the training and we (as of
+this writing) haven't yet. Specifics:
+
+| Project | What it does | How it's ahead of us (today) |
+|---|---|---|
+| [UVH-26 (IISc, Nov 2025)](https://arxiv.org/abs/2511.02563) | 26,646 real Bengaluru traffic-camera images, 1.8M boxes, 14 India-specific classes with body-type granularity, fine-tuned YOLOv11/DAMO-YOLO/RT-DETRv2 | **Measured the fine-tuning gain**: up to 31.5% mAP@50:95 improvement over COCO-trained baselines. We built the same capability (Plan C, now including this dataset — see 1c above) but haven't run the training yet, so we don't have our own number to compare. |
+| ["Fine-Tuning Without Forgetting" (arXiv 2505.01016)](https://arxiv.org/abs/2505.01016) + related error-analysis work | Quantifies exactly the failure mode we diagnosed: COCO-baseline YOLO/RT-DETR models "did not recognize certain vehicle classes unique to India... such as 3-wheelers and LCVs" | Independent third-party confirmation (beyond the IDD paper itself) that our root-cause diagnosis was correct. RT-DETR-X fine-tuned on Indian data reached 0.67 mAP@50:95 vs. 0.40 for the COCO-trained baseline on shared classes (Car/Bus/Truck) — again, a number we don't have yet ourselves. |
+| [AdroitAnandAI/ADAS-Car-using-Raspberry-Pi](https://github.com/AdroitAnandAI/ADAS-Car-using-Raspberry-Pi) | Real hardware ADAS on Indian roads: Raspberry Pi + actual LiDAR + camera, low-level sensor fusion for collision avoidance | Uses REAL LiDAR for depth, which is inherently more accurate/robust than our monocular depth estimation (Depth Anything V2) — the right tradeoff if you're building physical hardware. We're a software/video-analysis pipeline (matches this project's actual scope — nobody asked for a physical sensor rig), so monocular depth is the correct choice here, just worth knowing the ceiling if this ever becomes a hardware project. |
+| IDD (WACV 2019) + DriveIndia (2025) | The two India-specific datasets we already integrated (Section 3.4 Part 1) | We're not behind here — both are already wired into `prepare_merged.py`. |
+
+**The one real, actionable gap this research surfaced:** we hadn't added
+UVH-26 as a data source. It's now integrated (`data/prepare_uvh26.py`,
+Section 3.4 Part 1c) — it's the freshest and largest of the three India
+sources, so combining all three (IDD + DriveIndia + UVH-26) should give
+more training signal per class than any of them alone.
+
+**The one thing we're already doing right that's worth knowing:** the
+"Fine-Tuning Without Forgetting" paper's whole premise is that naively
+fine-tuning on new data risks catastrophically forgetting the original
+(COCO/KITTI) classes. `prepare_merged.py` already avoids this by construction
+— it trains on KITTI + India sources TOGETHER in one merged dataset (joint
+training), not as a sequential "train on KITTI, then fine-tune on India"
+step, which is the pattern that actually risks forgetting.
+
+---
+
 ## 3.4 PLAN C — FIX FOR "FAKE DETECTIONS" + "LANE DETECTION DOESN'T WORK" ON INDIAN VIDEOS
 
 **Do this if you're testing/deploying on Indian road footage** (in addition
@@ -380,15 +414,24 @@ python data/prepare_idd.py --data_root data/IDD_Detection --out data/idd_yolo
 #     script reads its real class names rather than guessing IDs), then:
 python data/prepare_driveindia.py --data_root data/DriveIndia --out data/driveindia_yolo
 
-# 1c. Re-merge (adds to whatever Plan A/B sources you already have):
-python data/prepare_merged.py --out data/merged_yolo \
-  --idd data/idd_yolo --driveindia data/driveindia_yolo
-# You'll see a WARNING in the output if neither idd/ nor driveindia/ were
-# found — that means autorickshaw/animal/rider/vehicle_fallback get ZERO
-# training examples and will never be detected. Don't skip this if you're
-# testing on Indian footage.
+# 1c. UVH-26 (IISc, Nov 2025) — found while researching how other projects
+#     solved this exact problem (see comparison below). 26,646 REAL Bengaluru
+#     traffic-camera images, 1.8M boxes, COCO JSON format, no registration
+#     wall (HF account only). Body-type granularity we don't need (Hatchback/
+#     Sedan/SUV/MUV) gets collapsed into car/van by this script.
+#     https://huggingface.co/datasets/iisc-aim/UVH-26
+python data/prepare_uvh26.py --data_root data/UVH26 --out data/uvh26_yolo
 
-# 1d. Re-train (same Job A as before, just with the enlarged merged dataset —
+# 1d. Re-merge (adds to whatever Plan A/B sources you already have):
+python data/prepare_merged.py --out data/merged_yolo \
+  --idd data/idd_yolo --driveindia data/driveindia_yolo --uvh26 data/uvh26_yolo
+# You'll see a WARNING in the output if idd/driveindia/uvh26 are ALL missing
+# — that means autorickshaw/animal/rider/vehicle_fallback get ZERO training
+# examples and will never be detected. Don't skip this if you're testing on
+# Indian footage. Any ONE of the three is enough to silence the warning, but
+# more sources = better coverage — no reason not to use all three if you can.
+
+# 1e. Re-train (same Job A as before, just with the enlarged merged dataset —
 # see KRISH_HANDOVER.md Section 4 Job A). Even a partial-epoch fine-tune from
 # your existing best.pt checkpoint on just the new classes helps a lot more
 # than training from yolo11x.pt COCO weights again.
