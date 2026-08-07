@@ -48,6 +48,74 @@ this table is the fast version.
 
 ---
 
+## THE COMPLETE FLOW — YOUR ROADMAP (read this second, then follow it in order)
+
+Everything below is one continuous path from zero to a finished, demoable
+product. Each phase says roughly how long it takes, whether you need to sit
+and watch it or can walk away, and which section has the full detail.
+
+```
+PHASE 0   Check if this has already been done                    (5 min, YOU WATCH)
+   │      -> §PHASE 0 below. Skip Phase 1-4 entirely if you find a checkpoint.
+   ▼
+PHASE 1   Get the code + environment on the HPC cluster           (30 min, YOU WATCH)
+   │      -> Section 1
+   ▼
+PHASE 2   Validate the decision logic (no GPU needed)              (2 min, YOU WATCH)
+   │      -> Section 1.5   |   expect: ALL CHECKS PASSED (27/27)
+   ▼
+PHASE 3   Decide Plan A/B, download + convert datasets          (hours-1 day, YOU WATCH)
+   │      -> Section 3 (3.1 decision table, then 3.2 or 3.3)
+   │      -> ALSO do Plan C now if targeting Indian-road video (Section 3.4 Part 1)
+   ▼
+PHASE 4   Smoke test, then submit the two big training jobs        (36-48h, WALK AWAY)
+   │      -> Section 4, Job A (detector) + Job B (lanes)
+   │      -> submitted in parallel, run unattended, check back with qstat/squeue
+   ▼
+PHASE 5   Small jobs: classifiers + drivable-area + weight downloads (~2-6h, YOU WATCH)
+   │      -> Section 4, Jobs C+D+G+E. Simplest: wait for Job A, then
+   │         `qsub training/pbs/aux_and_eval.pbs` (does C+D+G+F together).
+   │         Faster: run C+D+G on an interactive node WHILE Job A trains
+   │         (they don't need its output, only Job F does — see Section 4.0).
+   ▼
+PHASE 6   Run full evaluation (needs Job A's best.pt)                  (~3h, YOU WATCH)
+   │      -> Section 4, Job F -> runs/final_evaluation.json + report tables
+   ▼
+PHASE 7   Run the end product on real video, make demo clips          (~1h, YOU WATCH)
+   │      -> Section 5
+   ▼
+PHASE 8   Fill the results table, commit, push                        (~1h, YOU WATCH)
+          -> Section 6 (git) + Section 7 (results table)
+```
+
+### PHASE 0 — Check if this has already been done (do this FIRST, always)
+
+Training Job A takes 36-48h. Before you spend that time, check whether a
+trained checkpoint already exists somewhere on the cluster (Krish or anyone
+else may have already run this):
+
+```bash
+find / -name "best.pt" -o -name "clrnet_r101_culane.pth" 2>/dev/null
+find / -iname "*yolo11x_merged*" -o -iname "autonomous_detection" 2>/dev/null
+ls /scratch/ /project/ /data/ 2>/dev/null   # common shared-storage locations
+```
+
+If you find one, verify it before trusting it — don't assume it's current:
+
+```bash
+python -c "from ultralytics import YOLO; m = YOLO('<found_path>/best.pt'); print(len(m.names), m.names)"
+# 15 classes (car...vehicle_fallback) -> Plan C (India fix) already trained, skip to PHASE 6/7
+# 11 classes (car...misc)             -> only base training done, autorickshaw/animal etc.
+#                                         still won't detect -> you still need PHASE 3 (Plan C)
+#                                         + a re-run of Job A, but can otherwise skip to PHASE 6
+```
+
+The fastest way to find an existing checkpoint is still just asking whoever
+ran it for the absolute path — filesystem archaeology is the fallback, not
+the first move.
+
+---
+
 # 0. WHAT THE FINAL PRODUCT IS
 
 One command runs the full ADAS system on any video:
@@ -545,21 +613,42 @@ Both versions of every job script exist — same training, different scheduler:
 |---|---|---|
 | A (detector) | `sbatch training/slurm/yolo11x_merged.sh` | `qsub training/pbs/yolo11x_merged.pbs` |
 | B (lanes) | `sbatch training/slurm/clrnet_culane.sh` | `qsub training/pbs/clrnet_culane.pbs` |
-| C+D+F (classifiers+eval) | run interactively (§4 below) | `qsub training/pbs/aux_and_eval.pbs` |
+| C+D+G+F (classifiers+drivable-area+eval) | run interactively (Jobs C+D+G+F below) | `qsub training/pbs/aux_and_eval.pbs` |
+
+Job E (depth/night weight downloads) is separate on both schedulers — it's
+just `git clone` + manually grabbing a checkpoint file, not a training job,
+so it doesn't need `sbatch`/`qsub` at all. Do it anytime, no GPU needed
+(see Job E below).
 
 PBS monitoring: `qstat -u $USER` (status), `qdel <jobid>` (cancel),
 `tail -f logs/yolo11x_merged.log` (live output). If your cluster's PBS needs a
 queue name, add `#PBS -q <queue>` (find queues with `qstat -Q`).
 
-## Job order (A and B run in parallel; C/D/E after; F last)
+## Job order (A and B run in parallel; C/D/G need A's output; F is last)
 
 ```
    ┌── JOB A: detector (8 GPU, ~36h) ──┐
    │                                    ├──▶ JOB C+D: classifiers (1 GPU, 1.5h)
-   └── JOB B: lanes    (4 GPU, ~24h) ──┘         │
+   └── JOB B: lanes    (4 GPU, ~24h) ──┘    JOB G: drivable-area (1 GPU, ~1-2h, PLAN C)
+                                                  │
+   JOB E: weight downloads — no GPU, do anytime, doesn't block anything
                                                   ▼
-                                          JOB F: evaluation (1 GPU, ~3h)
+                                          JOB F: evaluation (1 GPU, ~3h,
+                                                  needs Job A's best.pt)
 ```
+
+On PBS, Jobs C+D+G+F are bundled as one script
+(`qsub training/pbs/aux_and_eval.pbs`) for convenience — it does each one in
+sequence and skips any whose input data isn't there yet (e.g. Job G skips
+itself if you haven't done the Plan C drivable-area `prepare` step from
+Section 3.4 Part 2). Only Job F actually needs Job A's `best.pt`, so you
+have two options:
+- **Simple (recommended):** submit the bundle only after Job A finishes.
+  You lose a bit of parallelism (C/D/G could've run earlier) but it's one
+  command and always correct.
+- **Faster:** run Jobs C+D (see "JOBS C + D" below) and Job G's `train`
+  step manually on an interactive node WHILE Job A is still training, then
+  submit just Job F once `best.pt` exists.
 
 ## JOB A — Main detector (YOLOv11x @ 1280px on merged data)
 
@@ -728,15 +817,42 @@ Every module has a `__main__` smoke test or prints its load status — test modu
 
 # 9. DAY-BY-DAY CHECKLIST
 
+This is the same flow as "THE COMPLETE FLOW" roadmap near the top of this
+doc, spread across a realistic week. Start with **PHASE 0** — check for an
+existing trained checkpoint before you commit to any of this.
+
 ```
-DAY 1: Setup (§1) + start ALL dataset downloads (§3.1 + Plan A or B)
-       + register nuScenes (instant) + BDD100K attempt (Plan A)
-DAY 2: Convert datasets (prepare_*.py) + merge + SMOKE TEST Job A (1 epoch)
+DAY 0: PHASE 0 — search for/ask about an existing trained checkpoint (5 min).
+       Found one with 15 classes? Skip to DAY 5. Found one with 11 classes?
+       You still need DAY 1-3 (Plan C data) + a re-run of Job A, but can
+       skip straight to DAY 4's monitoring once that's submitted.
+
+DAY 1: Setup (§1) + validate logic (§1.5, expect 27/27) + start ALL dataset
+       downloads (§3.1 + Plan A or B) + register nuScenes (instant) and
+       BDD100K (Plan A, ~2 day approval wait — start this early)
+       + if targeting Indian-road video: register IDD (§3.4 Part 1, ~1 day
+       approval) and start the DriveIndia/UVH-26 downloads (no wait)
+
+DAY 2: Convert datasets (prepare_*.py, including prepare_idd.py /
+       prepare_driveindia.py / prepare_uvh26.py if doing Plan C) + merge
+       (prepare_merged.py — check the console for the "no India data" warning)
+       + SMOKE TEST Job A (1 epoch)
+
 DAY 3: Submit Job A + Job B → both run unattended 1-2 days
-       Meanwhile: Jobs C, D (classifiers) + Job E (weight downloads)
-DAY 4: Monitor training; test pipeline modules one-by-one with pretrained weights
-DAY 5: Job A/B finish → copy weights → run Job F evaluation
+       Meanwhile: Jobs C, D, G (classifiers + drivable-area, see §4.0's
+       "faster" option) + Job E (weight downloads, no GPU needed)
+
+DAY 4: Monitor training (qstat/squeue); test pipeline modules one-by-one
+       with pretrained weights while you wait
+
+DAY 5: Job A/B finish → run Job F evaluation (§4, needs Job A's best.pt)
+
 DAY 6: Demo videos (4 clips, §5) + overtaking validation (50 clips, §7)
+       + if Indian-road footage is in scope, specifically test a phantom-
+       detection clip and an unmarked-road clip to confirm §3.4 Parts 2-3
+       are behaving (drivable-area corridor drawn, sanity_filter rejection
+       count printed at the end of the run)
+
 DAY 7: Fill results table (§7) + commit + push + update METHODOLOGY_REPORT
 ```
 
