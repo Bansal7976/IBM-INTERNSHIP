@@ -382,30 +382,41 @@ def test_optional_module_degradation():
     finally:
         ld.CLRNetWrapper = original
 
-    # The mmcv compat shim should be a faithful no-op decorator in both
-    # @mmcv.jit and @mmcv.jit(...) usages (CLRNet uses the latter).
+    # models/mmcv_compat.py (Krish's fix) restores the mmcv 1.x symbols CLRNet
+    # needs under mmcv 2.x. Verify it exposes them and that its jit shim is a
+    # faithful no-op in BOTH decorator forms — CLRNet uses `@mmcv.jit(...)`,
+    # which is the form that breaks if a shim only handles the bare version.
     import types
     fake_mmcv = types.ModuleType("mmcv")
-    sys.modules_backup = sys.modules.get("mmcv")
+    saved_mmcv = sys.modules.get("mmcv")
+    saved_compat = sys.modules.pop("models.mmcv_compat", None)
     sys.modules["mmcv"] = fake_mmcv
     try:
-        ld._install_mmcv1_compat_shim()
-        check("mmcv shim: adds .jit when missing", hasattr(fake_mmcv, "jit"))
+        import importlib
+        importlib.import_module("models.mmcv_compat")   # applies patches on import
+
+        for attr in ("jit", "load", "dump", "runner", "parallel"):
+            check(f"mmcv_compat: restores mmcv.{attr}", hasattr(fake_mmcv, attr))
 
         @fake_mmcv.jit(coderize=True)          # CLRNet's actual usage
         def f(x):
             return x * 2
-        check("mmcv shim: @mmcv.jit(...) leaves the function working",
+        check("mmcv_compat: @mmcv.jit(...) leaves the function working",
               f(21) == 42, f"got {f(21)}")
 
         @fake_mmcv.jit                          # bare-decorator usage
         def g(x):
             return x + 1
-        check("mmcv shim: bare @mmcv.jit leaves the function working",
+        check("mmcv_compat: bare @mmcv.jit leaves the function working",
               g(41) == 42, f"got {g(41)}")
+    except ImportError as e:
+        check("mmcv_compat: module importable", False, str(e))
     finally:
-        if sys.modules_backup is not None:
-            sys.modules["mmcv"] = sys.modules_backup
+        sys.modules.pop("models.mmcv_compat", None)
+        if saved_compat is not None:
+            sys.modules["models.mmcv_compat"] = saved_compat
+        if saved_mmcv is not None:
+            sys.modules["mmcv"] = saved_mmcv
         else:
             sys.modules.pop("mmcv", None)
 

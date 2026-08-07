@@ -46,41 +46,6 @@ class LaneResult:
             self.ego_lane["right"] = min(right, key=bottom_x)    # closest from right
 
 
-def _install_mmcv1_compat_shim():
-    """Let CLRNet import under mmcv 2.x.
-
-    CLRNet was written against mmcv-full 1.x and decorates functions with
-    `@mmcv.jit(...)` / `@mmcv.skip_no_elena`. Both were removed in mmcv 2.x,
-    so importing CLRNet on a modern environment dies with
-    `AttributeError: module 'mmcv' has no attribute 'jit'` (hit on the HPC
-    cluster, Aug 2026).
-
-    Re-adding them as identity decorators is not a hack — it restores the
-    exact behavior of mmcv 1.x on standard PyTorch. In mmcv 1.x these were
-    only functional under the Parrots backend (an internal SenseTime
-    framework); on regular PyTorch builds they returned the undecorated
-    function unchanged. So on this cluster the shim is a faithful no-op,
-    identical to what CLRNet ran with originally.
-
-    Does nothing if mmcv is absent or already provides these attributes.
-    """
-    try:
-        import mmcv
-    except ImportError:
-        return   # caller's import of clrnet will fail with a clear error
-
-    def _identity_decorator(func=None, **_kwargs):
-        if func is None:                      # used as @mmcv.jit(...)
-            return lambda f: f
-        return func                           # used as @mmcv.jit
-
-    for attr in ("jit", "skip_no_elena"):
-        if not hasattr(mmcv, attr):
-            setattr(mmcv, attr, _identity_decorator)
-            print(f"[lane_detector] mmcv.{attr} missing (mmcv 2.x) — "
-                  f"installed no-op compat shim for CLRNet")
-
-
 class CLRNetWrapper:
     """CLRNet inference wrapper (primary lane detector)."""
 
@@ -88,9 +53,8 @@ class CLRNetWrapper:
         repo = PROJECT_ROOT / "external" / "CLRNet"
         sys.path.insert(0, str(repo))
         import torch
-
-        _install_mmcv1_compat_shim()
-
+        # Patch mmcv 2.x to expose the 1.x API that CLRNet expects
+        from models import mmcv_compat  # noqa: F401  (side-effects only)
         from clrnet.models.registry import build_net
         from clrnet.utils.config import Config
 
@@ -99,7 +63,11 @@ class CLRNetWrapper:
         self.device = device if torch.cuda.is_available() else "cpu"
         self.net = build_net(self.cfg).to(self.device).eval()
         state = torch.load(weights, map_location=self.device)
-        self.net.load_state_dict(state["net"] if "net" in state else state)
+        raw = state["net"] if "net" in state else state
+        # Strip DataParallel 'module.' prefix saved by multi-GPU training
+        if any(k.startswith("module.") for k in raw):
+            raw = {k[len("module."):]: v for k, v in raw.items()}
+        self.net.load_state_dict(raw, strict=False)
         self.input_w = self.cfg.img_w
         self.input_h = self.cfg.img_h
         self.cut_height = getattr(self.cfg, "cut_height", 270)
@@ -218,7 +186,7 @@ def load_lane_detector(prefer: str = "clrnet", **kwargs):
     except Exception as e:
         # BUG FIX: this used to catch only (ImportError, FileNotFoundError).
         # On the HPC cluster CLRNet raised AttributeError (mmcv 2.x removed
-        # mmcv.jit — see _install_mmcv1_compat_shim above), which escaped
+        # mmcv.jit — see models/mmcv_compat.py), which escaped
         # this handler and crashed the WHOLE pipeline instead of degrading
         # to the fallback. A third-party research repo can fail at import or
         # construction time in many ways (missing CUDA ops, version skew,
