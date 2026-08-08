@@ -71,6 +71,63 @@ class CLRNetWrapper:
         self.input_w = self.cfg.img_w
         self.input_h = self.cfg.img_h
         self.cut_height = getattr(self.cfg, "cut_height", 270)
+        # The coordinate space CLRNet reports lanes in — see remap_to_frame().
+        self.ori_img_w = getattr(self.cfg, "ori_img_w", 1640)
+        self.ori_img_h = getattr(self.cfg, "ori_img_h", 590)
+
+    @staticmethod
+    def remap_to_frame(pts: np.ndarray, frame_w: int, frame_h: int,
+                       ori_w: int, ori_h: int, cut_height: int) -> np.ndarray:
+        """Map CLRNet lane points into the coordinate space of OUR frame.
+
+        THE BUG THIS FIXES
+        -------------------
+        CLRNet's `Lane.to_array(cfg)` does NOT return normalized coordinates.
+        It returns pixels in the ORIGINAL CULane image space — `cfg.ori_img_w`
+        x `cfg.ori_img_h`, i.e. 1640x590 — because it multiplies its
+        normalized predictions back up by those config values internally.
+
+        The previous code only rescaled when `pts[:,0].max() <= 2` (i.e. only
+        if the values looked normalized). With real CULane-space values of up
+        to 1640 that branch never fired, so NO rescaling happened at all and
+        1640x590 coordinates were drawn straight onto an 848x480 video. The
+        polylines landed nowhere near the actual paint, which is why the
+        lane-type heuristic reported "unknown" on 3604/3604 cluster frames
+        while CLRNet was happily reporting 4 lanes per frame.
+
+        THE MAPPING
+        -----------
+        Inference feeds `frame[cut_height:]` resized to (img_w, img_h), which
+        mirrors what CLRNet does to a CULane image: crop `cut_height` off the
+        top, resize the remaining `ori_h - cut_height` rows. So a model-space
+        row corresponds to the same FRACTION of the cropped region in both,
+        and the y mapping has to go through the crop, not the full height:
+
+            x_frame = x_ori * frame_w / ori_w
+            y_frame = cut + (y_ori - cut) * (frame_h - cut) / (ori_h - cut)
+
+        Normalized input (max <= 2.0) is still handled, so this stays correct
+        if a config or CLRNet version reports in [0,1] instead.
+        """
+        pts = np.asarray(pts, dtype=np.float64).copy()
+        if len(pts) == 0:
+            return pts.astype(np.float32)
+
+        # --- x ---
+        if pts[:, 0].max() <= 2.0:            # normalized [0,1]
+            pts[:, 0] *= frame_w
+        else:                                  # CULane pixel space
+            pts[:, 0] *= frame_w / float(ori_w)
+
+        # --- y ---
+        cut = float(cut_height)
+        if pts[:, 1].max() <= 2.0:            # normalized within the CROPPED region
+            pts[:, 1] = cut + pts[:, 1] * (frame_h - cut)
+        else:                                  # CULane pixel space
+            denom = max(float(ori_h) - cut, 1e-6)
+            pts[:, 1] = cut + (pts[:, 1] - cut) * (frame_h - cut) / denom
+
+        return pts.astype(np.float32)
 
     def infer(self, frame_bgr: np.ndarray) -> LaneResult:
         import torch
@@ -86,23 +143,21 @@ class CLRNetWrapper:
             lanes = self.net.heads.get_lanes(output)[0]   # list of Lane objects
 
         result = LaneResult()
-        scale_y = (h0 - self.cut_height)
         for lane in lanes:
-            pts = lane.to_array(self.cfg)                  # normalized (x, y)
+            pts = lane.to_array(self.cfg)      # CULane-space pixels (see remap_to_frame)
             pts = pts[(pts[:, 0] > 0) & (pts[:, 1] > 0)]
             if len(pts) < 2:
                 continue
-            # to_array() may return pixel coords already (CLRNet's own convention
-            # varies by config) or normalized [0,1] coords depending on cfg.ori_img_h/w.
-            # BUG FIX: the old line always multiplied by w0 regardless of the
-            # ternary branch (`w0/1.0 if cond else w0` both equal w0), so pixel-
-            # scale output got re-multiplied by w0 and blew up to nonsense
-            # coordinates -> polylines silently unusable downstream.
-            if pts[:, 0].max() <= 2:
-                pts[:, 0] *= w0
-            pts[:, 1] = pts[:, 1] * scale_y + self.cut_height \
-                if pts[:, 1].max() <= 2 else pts[:, 1]
-            result.polylines.append(pts.astype(np.float32))
+            pts = self.remap_to_frame(pts, w0, h0, self.ori_img_w,
+                                      self.ori_img_h, self.cut_height)
+            # Drop anything that still falls outside the frame after remapping
+            # rather than letting off-screen points skew the ego-lane pick.
+            inside = ((pts[:, 0] >= 0) & (pts[:, 0] < w0)
+                      & (pts[:, 1] >= 0) & (pts[:, 1] < h0))
+            pts = pts[inside]
+            if len(pts) < 2:
+                continue
+            result.polylines.append(pts)
         result.assign_ego_lane(w0)
         return result
 
