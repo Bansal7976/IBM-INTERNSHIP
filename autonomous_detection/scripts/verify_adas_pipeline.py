@@ -350,7 +350,68 @@ def test_entry_points_run_as_scripts():
 
 
 # --------------------------------------------------------------------------
-# 8. CLRNet coordinate-scaling regression test (no GPU/weights needed —
+# 8. Optional modules degrade gracefully instead of killing the pipeline.
+#
+#    REGRESSION TEST for a real HPC failure: CLRNet raised AttributeError
+#    (mmcv 2.x dropped mmcv.jit), load_lane_detector only caught
+#    (ImportError, FileNotFoundError), so the error escaped and took the
+#    entire pipeline down — even though lane detection is explicitly
+#    optional and has a drivable-area fallback.
+# --------------------------------------------------------------------------
+
+def test_optional_module_degradation():
+    import models.lane_detector as ld
+
+    original = ld.CLRNetWrapper
+    try:
+        # Simulate the exact cluster failure: a non-Import/FileNotFound error
+        # raised while constructing the third-party lane model.
+        class _Boom:
+            def __init__(self, *a, **k):
+                raise AttributeError("module 'mmcv' has no attribute 'jit'")
+
+        ld.CLRNetWrapper = _Boom
+        result = ld.load_lane_detector("clrnet")
+        check("degradation: load_lane_detector returns None (not raises) when "
+              "CLRNet blows up with a non-import error",
+              result is None, f"got {result!r}")
+    except Exception as e:
+        check("degradation: load_lane_detector returns None (not raises) when "
+              "CLRNet blows up with a non-import error",
+              False, f"it RAISED instead: {type(e).__name__}: {e}")
+    finally:
+        ld.CLRNetWrapper = original
+
+    # The mmcv compat shim should be a faithful no-op decorator in both
+    # @mmcv.jit and @mmcv.jit(...) usages (CLRNet uses the latter).
+    import types
+    fake_mmcv = types.ModuleType("mmcv")
+    sys.modules_backup = sys.modules.get("mmcv")
+    sys.modules["mmcv"] = fake_mmcv
+    try:
+        ld._install_mmcv1_compat_shim()
+        check("mmcv shim: adds .jit when missing", hasattr(fake_mmcv, "jit"))
+
+        @fake_mmcv.jit(coderize=True)          # CLRNet's actual usage
+        def f(x):
+            return x * 2
+        check("mmcv shim: @mmcv.jit(...) leaves the function working",
+              f(21) == 42, f"got {f(21)}")
+
+        @fake_mmcv.jit                          # bare-decorator usage
+        def g(x):
+            return x + 1
+        check("mmcv shim: bare @mmcv.jit leaves the function working",
+              g(41) == 42, f"got {g(41)}")
+    finally:
+        if sys.modules_backup is not None:
+            sys.modules["mmcv"] = sys.modules_backup
+        else:
+            sys.modules.pop("mmcv", None)
+
+
+# --------------------------------------------------------------------------
+# 9. CLRNet coordinate-scaling regression test (no GPU/weights needed —
 #    exercises the exact arithmetic that was buggy)
 # --------------------------------------------------------------------------
 
@@ -400,6 +461,8 @@ def main():
         ("Sanity filter (phantom-detection geometric check)", test_sanity_filter),
         ("Entry points run as real scripts (import-path regression)",
          test_entry_points_run_as_scripts),
+        ("Optional-module graceful degradation + mmcv shim",
+         test_optional_module_degradation),
         ("CLRNet coordinate-scaling regression", test_clrnet_coord_scaling),
     ]:
         print(f"\n--- {name} ---")
