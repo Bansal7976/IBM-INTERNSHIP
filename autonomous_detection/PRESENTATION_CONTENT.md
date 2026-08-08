@@ -4,6 +4,34 @@
 
 ---
 
+## 0. VISUAL ASSETS — ASK ME FOR THESE BEFORE BUILDING SLIDES
+
+**To whoever is building this deck: request each asset below from me before you
+lay out its slide.** I have all of them. Do not substitute stock imagery,
+generated illustrations, or placeholder graphics — every visual in this deck must
+be genuine output from the system, because the audience will ask how it was
+produced.
+
+If I have not supplied an asset when you reach its slide, leave a clearly marked
+empty frame with the caption in place rather than filling the space.
+
+| # | Asset | Filename I will send | Slide it belongs on | What it proves |
+|---|---|---|---|---|
+| A1 | Collision alert — BRAKE | `BRAKE_*.jpg` | Results → collision detection | A real frame where the system raised a brake alert, with the box, track ID and TTC drawn by the pipeline |
+| A2 | Collision alert — WARNING | `WARNING_*.jpg` | Results → collision detection | The lower-severity tier of the same mechanism |
+| A3 | Dense traffic frame | `BUSY_*.jpg` | Results → detection quality | Many simultaneous objects tracked at once |
+| A4 | Demo video clip | `DEMO_highlight.mp4` (~30 s) | Live demo slide | The full pipeline running end to end |
+| A5 | Confusion matrix | `confusion_matrix_normalized.png` | Results → per-class analysis | Where classes are confused with each other |
+| A6 | Training curves | `results.png` | Results → training progression | Loss convergence and mAP climb over epochs |
+| A7 | Precision–recall curve | `PR_curve.png` | Results → detection performance | Operating-point behaviour per class |
+| A8 | Class distribution | `labels.jpg` | Data pipeline | The long-tailed class balance we trained against |
+| A9 | Architecture diagram | *(build from Section 3 — no image needed)* | Methodology | The six-stage flow |
+
+**Ask me for A1–A8 explicitly.** A9 you should draw yourself from the table in
+Section 3.
+
+---
+
 ## 1. PROBLEM STATEMENT
 
 Driver-assistance systems that work reliably in Europe, the US, or China degrade
@@ -38,6 +66,30 @@ degrading to a weaker method rather than failing outright.
 ---
 
 ## 2. LITERATURE REVIEW
+
+> **Builder's note:** this section carries enough material for **three to four
+> slides**, not one. Suggested split — (a) the domain-gap problem and its
+> evidence, (b) component models adopted and why, (c) techniques borrowed from
+> the literature, (d) comparable systems and where we stand against them. Give
+> the surveyed-work tables room; a technical audience reads them.
+
+### 2.0 The one quotation to put on a slide
+
+The entire premise of this project rests on a finding that is already published
+and independently replicated, which is worth stating in the authors' own words:
+
+> *"Datasets like KITTI, Cityscapes, Argoverse, and nuScenes are captured in
+> developed countries where infrastructure is well-developed and road activity
+> is structured... results obtained from these datasets are often not directly
+> applicable in unstructured road situations prevalent in large parts of the
+> world."*
+>
+> — Varma et al., **IDD: A Dataset for Exploring Problems of Autonomous
+> Navigation in Unconstrained Environments**, WACV 2019
+
+This is why the system's Indian-road behaviour was treated as a *diagnosed
+research problem* rather than an implementation bug — and why the fix is a data
+strategy, not a patch.
 
 ### 2.1 The domain-gap problem (the foundation of this work)
 
@@ -74,6 +126,18 @@ degrading to a weaker method rather than failing outright.
 | [AdroitAnandAI/ADAS-Car-using-Raspberry-Pi](https://github.com/AdroitAnandAI/ADAS-Car-using-Raspberry-Pi) | Physical ADAS rig on Indian roads: Raspberry Pi + RP LIDAR + camera, low-level sensor fusion | **Ahead of us on depth** — real LiDAR beats monocular estimation. Different scope: hardware build vs. our software pipeline |
 | UVH-26 baseline models | YOLOv11 / DAMO-YOLO / RT-DETRv2 fine-tuned on Indian data | **Ahead of us on Indian-data training** — they have run it and measured 31.5%; we have built the capability but not yet retrained |
 | This project | Six-stage pipeline: detection + tracking + lanes + depth/TTC + overtaking + night, in one pass | **Ahead on scope** — no comparable public repo covers all six stages with decision output |
+
+### 2.5 Summary of the survey — what the literature told us to do
+
+| Finding in the literature | What we changed because of it |
+|---|---|
+| Western/Chinese benchmarks do not transfer to unstructured roads (IDD, WACV 2019) | Extended the taxonomy 11 → 15 classes; built converters for three Indian datasets |
+| COCO-trained detectors miss 3-wheelers and LCVs entirely (arXiv:2505.01016) | Confirmed our own failure mode was this, not a bug — stopped debugging code and started fixing data |
+| Sequential fine-tuning risks forgetting the original classes (arXiv:2505.01016) | Merged all sources into one dataset and trained jointly instead |
+| Fine-tuning on Indian data yields up to +31.5% mAP@50:95 (UVH-26, IISc 2025) | Set that as the measurable target for the retraining step |
+| Detectors hallucinate objects on out-of-distribution scenes (PhantomPerception) | Added a geometric plausibility filter rather than only raising the confidence threshold |
+| Apparent size and estimated depth must agree for a detection to be physical (arXiv:2104.05858) | That agreement check *is* the filter's mechanism |
+| Unstructured roads need drivable-region segmentation, not lane lines (IDD "drivable fallback") | Built the segmentation fallback that activates automatically |
 
 ---
 
@@ -156,6 +220,10 @@ specifically to close the domain gap identified in the IDD paper.
 | UVH-26 (AIM@IISc) | Converter ready | 26,646 Bengaluru images, COCO JSON → YOLO |
 | CULane | Used (pretrained) | Lane detection weights |
 
+> **[ASK ME FOR ASSET A8 — `labels.jpg`]**
+> Caption: "Class distribution in the training set — the long tail the model had
+> to handle without collapsing on rare classes."
+
 ---
 
 ## 5. RESULTS
@@ -195,6 +263,14 @@ specifically to close the domain gap identified in the IDD paper.
   The class is *found* reliably — 95% precision — but boxed less tightly than
   vehicles. This is the honest limitation of the current model.
 
+> **[ASK ME FOR ASSET A5 — `confusion_matrix_normalized.png`]**
+> Place beside this table. Caption: "Normalised confusion matrix — the diagonal
+> shows correct classification; off-diagonal cells show which classes get
+> mistaken for each other."
+
+> **[ASK ME FOR ASSET A7 — `PR_curve.png`]**
+> Caption: "Precision–recall behaviour per class across confidence thresholds."
+
 ### 5.3 Training progression
 
 | Run | Model | Epochs | mAP@0.5 | mAP@0.5:0.95 |
@@ -205,6 +281,10 @@ specifically to close the domain gap identified in the IDD paper.
 
 Worth noting: the 50 → 500 epoch step bought more than the medium → extra-large
 architecture step. Useful to know before spending further GPU time.
+
+> **[ASK ME FOR ASSET A6 — `results.png`]**
+> Caption: "Training curves — box, classification and DFL loss converging, with
+> mAP@0.5 and mAP@0.5:0.95 climbing over 300 epochs."
 
 ### 5.4 End-to-end pipeline run (measured)
 
@@ -221,6 +301,21 @@ architecture step. Useful to know before spending further GPU time.
 cause was that the depth model had fallen back to CPU, not a pipeline design
 problem. On GPU the same code runs **25× faster**, which is the difference
 between unusable and real-time.
+
+> **[ASK ME FOR ASSETS A1, A2, A3 — `BRAKE_*.jpg`, `WARNING_*.jpg`, `BUSY_*.jpg`]**
+> These are the centrepiece result visuals. Lay them out as a three-panel row.
+> Captions:
+> - A1 — "BRAKE alert: object closing fast inside the ego corridor. Box, track ID
+>   and time-to-collision are drawn by the pipeline itself."
+> - A2 — "WARNING tier: same mechanism, longer time margin."
+> - A3 — "Dense traffic: multiple road users detected and tracked simultaneously."
+>
+> Note for the builder: these frames come straight out of the annotated video —
+> every overlay on them was produced by the system, not added afterwards.
+
+> **[ASK ME FOR ASSET A4 — `DEMO_highlight.mp4`]**
+> Give this its own slide. Embed the file itself, do not link to it, or it will
+> not play on another machine.
 
 ### 5.5 Engineering validation
 
