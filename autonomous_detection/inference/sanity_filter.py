@@ -77,7 +77,32 @@ class SizeConsistencyFilter:
     focal_length_px: Optional[float] = None
     margin: float = 1.6   # extra multiplicative slack beyond the table's own range
     min_depth_m: float = 1.0   # ignore very-close objects (depth noisy, box often clipped)
+    focal_length_is_estimated: bool = True
+    # Extra slack applied ON TOP of `margin` when the focal length is a
+    # field-of-view GUESS rather than real calibration.
+    #
+    # Why this exists: on the first real cluster run this filter rejected
+    # 3961 detections including 1130 "van" and 1039 "car" — clearly real
+    # objects, not phantoms. Cause: with no calibration it assumes ~90° HFOV,
+    # but a typical forward/dashcam camera is narrower (KITTI is ~81°, many
+    # dashcams ~70°). Assuming too WIDE an FOV underestimates focal length,
+    # which inflates every implied real-world width and over-rejects.
+    #
+    # The principled response to an uncertain input is a WIDER acceptance
+    # band, not a tighter one — and the asymmetry matters: dropping a real
+    # vehicle is worse than letting a phantom through, because phantoms are
+    # still gated by the ego-path check before they can raise a collision
+    # alert. Pass --kitti_calib (or any real calibration) to get the tight
+    # band; this slack then disappears automatically.
+    estimated_focal_extra_margin: float = 1.8
     rejected_count: dict = field(default_factory=dict, repr=False)
+    seen_count: int = 0          # total detections examined (for the reject ratio)
+    checked_count: int = 0       # detections actually size-checked
+
+    @property
+    def effective_margin(self) -> float:
+        return (self.margin * self.estimated_focal_extra_margin
+                if self.focal_length_is_estimated else self.margin)
 
     def filter(self, detections: list, depth_map: Optional[np.ndarray]) -> list:
         """Returns the subset of `detections` that pass the size-consistency
@@ -85,9 +110,11 @@ class SizeConsistencyFilter:
         aren't available, pass through untouched (graceful degradation —
         matches the rest of this codebase's philosophy: missing info means
         "can't check", not "reject")."""
+        self.seen_count += len(detections)
         if self.focal_length_px is None or depth_map is None:
             return detections
 
+        margin = self.effective_margin
         kept = []
         for d in detections:
             name = getattr(d, "class_name", "")
@@ -104,8 +131,9 @@ class SizeConsistencyFilter:
             x1, _, x2, _ = d.bbox
             bbox_w_px = max(x2 - x1, 1e-6)
             implied_width_m = bbox_w_px * depth_m / self.focal_length_px
+            self.checked_count += 1
 
-            lo, hi = rng[0] / self.margin, rng[1] * self.margin
+            lo, hi = rng[0] / margin, rng[1] * margin
             if lo <= implied_width_m <= hi:
                 kept.append(d)
             else:

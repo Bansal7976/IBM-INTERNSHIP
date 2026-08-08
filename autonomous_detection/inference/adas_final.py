@@ -124,7 +124,11 @@ class ADASFinalPipeline:
         if kitti_calib_path:
             focal_length_px = self._try(
                 lambda: focal_length_px_from_kitti_calib(kitti_calib_path))
-        self.sanity_filter = SizeConsistencyFilter(focal_length_px=focal_length_px)
+        self.sanity_filter = SizeConsistencyFilter(
+            focal_length_px=focal_length_px,
+            # Calibrated focal length -> tight band; a field-of-view guess ->
+            # deliberately wider band (see sanity_filter.py for why).
+            focal_length_is_estimated=focal_length_px is None)
 
         # Tracking
         from inference.tracker import ByteTrackWrapper
@@ -385,13 +389,21 @@ def main():
         writer.release()
         print(f"Saved: {args.save}")
     print(f"Decision log: {args.log}")
-    if pipe.sanity_filter.rejected_count:
-        total = sum(pipe.sanity_filter.rejected_count.values())
-        print(f"\n[sanity_filter] Rejected {total} phantom/implausible-size "
-              f"detections this run: {dict(pipe.sanity_filter.rejected_count)}")
-        print("  If this number seems too high (rejecting real objects) or too "
-              "low (still seeing phantoms), tune --conf and/or check that "
-              "--kitti_calib is set for accurate focal length.")
+    sf = pipe.sanity_filter
+    if sf.rejected_count:
+        total = sum(sf.rejected_count.values())
+        pct = 100.0 * total / max(sf.checked_count, 1)
+        print(f"\n[sanity_filter] Rejected {total} of {sf.checked_count} "
+              f"size-checked detections ({pct:.1f}%) as implausible-size/phantom")
+        print(f"  by class: {dict(sf.rejected_count)}")
+        print(f"  focal length: {sf.focal_length_px:.0f}px "
+              f"({'ESTIMATED from FOV guess' if sf.focal_length_is_estimated else 'CALIBRATED'})"
+              f", effective margin {sf.effective_margin:.2f}x")
+        if pct > 25 and sf.focal_length_is_estimated:
+            print("  ⚠ Rejection rate is high AND focal length is only estimated —"
+                  " likely rejecting REAL objects, not phantoms. Pass"
+                  " --kitti_calib <calib.txt> for the true focal length, or"
+                  " raise estimated_focal_extra_margin in sanity_filter.py.")
 
 
 if __name__ == "__main__":
