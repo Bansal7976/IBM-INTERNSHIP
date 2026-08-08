@@ -71,6 +71,27 @@ if not hasattr(_mmcv, "runner"):
     _runner.BaseRunner = object
     _runner.EpochBasedRunner = object
     _runner.build_optimizer = lambda cfg, model: None
+
+    # fp16 decorators — CLRNet's heads/backbones decorate forward() with
+    # @auto_fp16() / @force_fp32(). Next error after the jit fix on the HPC
+    # cluster was exactly: "cannot import name 'auto_fp16' from 'mmcv.runner'".
+    #
+    # Identity decorators are the correct behavior here, not a shortcut: in
+    # mmcv 1.x auto_fp16 checks `self.fp16_enabled` and, when it's unset or
+    # False, calls the undecorated function directly. We run inference in
+    # fp32 and never set fp16_enabled, so the 1.x decorator would have been a
+    # passthrough anyway.
+    def _fp16_decorator(*d_args, **d_kwargs):
+        # supports @auto_fp16, @auto_fp16(), and @auto_fp16(apply_to=(...))
+        if len(d_args) == 1 and callable(d_args[0]) and not d_kwargs:
+            return d_args[0]
+        return lambda func: func
+
+    _runner.auto_fp16 = _fp16_decorator
+    _runner.force_fp32 = _fp16_decorator
+    _runner.wrap_fp16_model = lambda model: model
+    _runner.get_dist_info = lambda: (0, 1)
+
     sys.modules["mmcv.runner"] = _runner
     _mmcv.runner = _runner
 

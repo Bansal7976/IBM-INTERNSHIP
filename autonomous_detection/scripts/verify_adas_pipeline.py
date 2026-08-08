@@ -301,6 +301,30 @@ def test_sanity_filter():
     check("sanity_filter: no-ops (passes everything) when depth_map is None",
           huge_car in kept_noop2)
 
+    # REGRESSION: the first real cluster run over-rejected (3961 detections,
+    # incl. 1130 "van" + 1039 "car") because with no calibration the focal
+    # length is a ~90-degree-FOV guess, and guessing too WIDE an FOV inflates
+    # every implied real-world width. An uncertain focal length must widen the
+    # acceptance band, never tighten it.
+    est = SizeConsistencyFilter(focal_length_px=fx, focal_length_is_estimated=True)
+    cal = SizeConsistencyFilter(focal_length_px=fx, focal_length_is_estimated=False)
+    check("sanity_filter: estimated focal length uses a WIDER margin than calibrated",
+          est.effective_margin > cal.effective_margin,
+          f"estimated={est.effective_margin} vs calibrated={cal.effective_margin}")
+
+    # A real car mis-measured because the FOV guess was wrong (~1.7x too wide
+    # a bbox for its depth) should survive under the estimated-fx band...
+    borderline = FakeDet((100, 300, 199, 380), 0.8, 0, "car")   # ~99px -> ~3.1m implied
+    check("sanity_filter: FOV-guess-inflated real car survives with estimated fx",
+          borderline in est.filter([borderline], depth_map))
+    # ...while a billboard-scale box stays rejected even with the wider band.
+    check("sanity_filter: billboard-scale box still rejected under the wider band",
+          huge_car not in est.filter([huge_car], depth_map))
+
+    check("sanity_filter: tracks seen/checked counts for the reject ratio",
+          est.seen_count > 0 and est.checked_count > 0,
+          f"seen={est.seen_count} checked={est.checked_count}")
+
 
 # --------------------------------------------------------------------------
 # 7. Entry points actually run as scripts.
@@ -397,6 +421,25 @@ def test_optional_module_degradation():
 
         for attr in ("jit", "load", "dump", "runner", "parallel"):
             check(f"mmcv_compat: restores mmcv.{attr}", hasattr(fake_mmcv, attr))
+
+        # mmcv.runner fp16 decorators — the SECOND cluster failure, after the
+        # jit fix: "cannot import name 'auto_fp16' from 'mmcv.runner'".
+        # CLRNet decorates forward() with @auto_fp16() / @force_fp32().
+        for attr in ("auto_fp16", "force_fp32", "load_checkpoint"):
+            check(f"mmcv_compat: mmcv.runner exposes {attr}",
+                  hasattr(fake_mmcv.runner, attr))
+
+        @fake_mmcv.runner.auto_fp16(apply_to=("x",))   # CLRNet's actual usage
+        def h(x):
+            return x * 3
+        check("mmcv_compat: @auto_fp16(...) leaves the function working",
+              h(14) == 42, f"got {h(14)}")
+
+        @fake_mmcv.runner.auto_fp16                     # bare form
+        def k(x):
+            return x - 1
+        check("mmcv_compat: bare @auto_fp16 leaves the function working",
+              k(43) == 42, f"got {k(43)}")
 
         @fake_mmcv.jit(coderize=True)          # CLRNet's actual usage
         def f(x):
