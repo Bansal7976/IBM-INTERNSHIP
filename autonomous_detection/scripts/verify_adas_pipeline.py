@@ -465,8 +465,76 @@ def test_optional_module_degradation():
 
 
 # --------------------------------------------------------------------------
-# 9. CLRNet coordinate-scaling regression test (no GPU/weights needed —
-#    exercises the exact arithmetic that was buggy)
+# 9. Heuristic lane-type classifier — solid vs dashed with no trained weights.
+#
+#    Without ANY lane-type source, overtaking.py's legality rule fails safe on
+#    every frame, so the verdict is a constant "NOT POSSIBLE - SOLID CENTER
+#    LINE" (observed 3604/3604 on the cluster) and the feature never engages.
+# --------------------------------------------------------------------------
+
+def test_heuristic_lane_type():
+    import cv2
+    from models.aux_classifiers import HeuristicLaneTypeClassifier
+
+    h, w = 400, 200
+    clf = HeuristicLaneTypeClassifier()
+
+    def frame_with_line(dashed: bool):
+        img = np.full((h, w, 3), 60, dtype=np.uint8)     # dark asphalt
+        for y in range(20, h - 20):
+            if dashed and (y // 20) % 2 == 1:            # periodic gaps
+                continue
+            cv2.line(img, (100, y), (100, y + 1), (235, 235, 235), 7)
+        return img
+
+    polyline = np.array([[100, y] for y in range(25, h - 25, 6)], dtype=np.float32)
+
+    solid_type = clf.classify_line(frame_with_line(dashed=False), polyline)
+    dashed_type = clf.classify_line(frame_with_line(dashed=True), polyline)
+
+    check("lane-type heuristic: continuous paint -> 'solid'",
+          solid_type == "solid", f"got {solid_type!r}")
+    check("lane-type heuristic: periodic gaps -> 'dashed'",
+          dashed_type == "dashed", f"got {dashed_type!r}")
+
+    # No paint at all (unmarked road) must stay 'unknown' so overtaking.py
+    # keeps failing safe rather than being told the road is clear.
+    blank = np.full((h, w, 3), 60, dtype=np.uint8)
+    check("lane-type heuristic: unmarked road stays 'unknown' (fail-safe)",
+          clf.classify_line(blank, polyline) == "unknown",
+          f"got {clf.classify_line(blank, polyline)!r}")
+
+    # classify() must return the same shape the pipeline/overtaking expect.
+    class FakeLanes:
+        polylines = [polyline, polyline + np.array([40, 0], dtype=np.float32)]
+    types = clf.classify(frame_with_line(dashed=True), FakeLanes())
+    check("lane-type heuristic: classify() provides the 'center' key "
+          "overtaking.py reads", "center" in types, f"got keys {list(types)}")
+
+    # End-to-end: a dashed centre line must let overtaking reach POSSIBLE,
+    # which is the whole point of adding this fallback.
+    from inference.overtaking import OvertakingAnalyzer, OvertakeStatus
+    from models.ipm import IPMTransformer
+    src = np.array([[300, 480], [340, 480], [280, 300], [360, 300]], dtype=np.float32)
+    dst = np.array([[-1.75, 5], [1.75, 5], [-1.75, 30], [1.75, 30]], dtype=np.float32)
+    az = OvertakingAnalyzer(ipm=IPMTransformer.from_points(src, dst))
+    straight = np.array([[320, 480 - i * 15] for i in range(12)], dtype=np.float32)
+
+    class Lanes2:
+        polylines = [straight, straight + np.array([60, 0], dtype=np.float32)]
+
+    status = az.analyze(Lanes2(), {"center": "dashed"}, tracks=[],
+                        depth_map=np.full((480, 640), 60.0, dtype=np.float32),
+                        ego_speed_mps=20.0, scene_brightness=150.0,
+                        lighting_state="DAY")
+    check("lane-type heuristic: a 'dashed' verdict unblocks overtaking "
+          "(no longer a constant NOT_POSSIBLE)",
+          status == OvertakeStatus.POSSIBLE, f"got {status}")
+
+
+# --------------------------------------------------------------------------
+# 10. CLRNet coordinate-scaling regression test (no GPU/weights needed —
+#     exercises the exact arithmetic that was buggy)
 # --------------------------------------------------------------------------
 
 def test_clrnet_coord_scaling():
@@ -517,6 +585,8 @@ def main():
          test_entry_points_run_as_scripts),
         ("Optional-module graceful degradation + mmcv shim",
          test_optional_module_degradation),
+        ("Heuristic lane-type classifier (no-weights fallback)",
+         test_heuristic_lane_type),
         ("CLRNet coordinate-scaling regression", test_clrnet_coord_scaling),
     ]:
         print(f"\n--- {name} ---")

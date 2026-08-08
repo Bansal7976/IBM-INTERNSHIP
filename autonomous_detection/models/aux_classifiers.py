@@ -145,3 +145,89 @@ class LaneTypeClassifier(nn.Module):
             mid = max(0, len(sorted_lines) // 2 - 1)
             result["center"] = result[id(sorted_lines[mid])]
         return result
+
+
+class HeuristicLaneTypeClassifier:
+    """Solid-vs-dashed from paint continuity — no training, no weights.
+
+    WHY THIS EXISTS
+    ----------------
+    LaneTypeClassifier above needs `weights/lane_type.pt`, trained from
+    BDD100K lane-marking labels. Without it, it returns "unknown" for every
+    line, and overtaking.py's legality rule fails safe — so the overtaking
+    verdict is a CONSTANT "NOT POSSIBLE - SOLID CENTER LINE" on every frame
+    (observed on the cluster: 3604/3604 frames identical), even once real
+    lane geometry is available. Correct behavior, but it means the whole
+    overtaking feature can never actually engage.
+
+    This fills that gap with the property that physically distinguishes the
+    two markings: a solid line is continuous paint along its whole length,
+    a dashed line alternates paint and gap. Walk the polyline, test whether
+    each sample sits on bright paint, then read continuity and the number of
+    paint<->gap transitions. Needs no labels because it measures the defining
+    geometric property directly rather than learning an appearance model.
+
+    Accuracy is lower than the trained classifier (the trained one also
+    separates double-solid and double-yellow, which this cannot), so it is
+    used ONLY as a fallback and reports "unknown" whenever the evidence is
+    thin — which keeps overtaking.py's fail-safe intact for those lines.
+    """
+
+    def __init__(self, patch: int = 9, n_samples: int = 24,
+                 bright_threshold: int = 160, paint_fraction: float = 0.08):
+        self.patch = patch
+        self.n_samples = n_samples
+        self.bright_threshold = bright_threshold
+        self.paint_fraction = paint_fraction
+
+    def classify_line(self, frame_bgr: np.ndarray, polyline: np.ndarray) -> str:
+        pts = np.asarray(polyline)
+        if len(pts) < 2:
+            return "unknown"
+
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+        half = self.patch // 2
+
+        idx = np.linspace(0, len(pts) - 1, self.n_samples).astype(int)
+        hits = []
+        for x, y in pts[idx]:
+            x, y = int(x), int(y)
+            if not (half <= x < w - half and half <= y < h - half):
+                continue
+            region = gray[y - half:y + half + 1, x - half:x + half + 1]
+            on_paint = (region > self.bright_threshold).mean() > self.paint_fraction
+            hits.append(1 if on_paint else 0)
+
+        # Too few valid samples (line mostly off-frame) -> don't guess.
+        if len(hits) < 6:
+            return "unknown"
+
+        hits = np.asarray(hits)
+        coverage = float(hits.mean())                    # fraction sitting on paint
+        transitions = int(np.abs(np.diff(hits)).sum())   # paint <-> gap switches
+
+        # Solid: paint nearly everywhere, almost no switching.
+        if coverage > 0.85 and transitions <= 2:
+            return "solid"
+        # Dashed: repeated switching is the signature, regardless of coverage.
+        if transitions >= 4:
+            return "dashed"
+        # Mostly-covered but a bit broken (worn solid line) -> treat as solid,
+        # which is the conservative call for an overtaking decision.
+        if coverage > 0.6:
+            return "solid"
+        return "unknown"
+
+    def classify(self, frame_bgr: np.ndarray, lanes) -> dict:
+        """Same signature/return shape as LaneTypeClassifier.classify, so this
+        is a drop-in replacement for the pipeline."""
+        result = {}
+        polylines = getattr(lanes, "polylines", lanes) or []
+        for pl in polylines:
+            result[id(pl)] = self.classify_line(frame_bgr, np.asarray(pl))
+        if polylines:
+            sorted_lines = sorted(polylines, key=lambda p: np.asarray(p)[:, 0].mean())
+            mid = max(0, len(sorted_lines) // 2 - 1)
+            result["center"] = result[id(sorted_lines[mid])]
+        return result

@@ -94,13 +94,24 @@ class ADASFinalPipeline:
         # Auxiliary classifiers (optional weights)
         from models.aux_classifiers import (
             TrafficLightStateClassifier, LaneTypeClassifier,
+            HeuristicLaneTypeClassifier,
             classify_light_hsv, decide_traffic_light_action)
         self._decide_tl = decide_traffic_light_action
         self._hsv_fallback = classify_light_hsv
         self.tl_classifier = self._try(
             lambda: TrafficLightStateClassifier(str(wdir / "tl_state.pt")))
+        # Trained lane-type classifier if its weights exist, else the
+        # no-training paint-continuity heuristic. Without EITHER, every line
+        # is "unknown" and overtaking.py's legality rule fails safe on every
+        # frame — correct, but it means the overtaking verdict is a constant
+        # and the feature never actually engages (observed: 3604/3604 frames
+        # identical on the cluster). See HeuristicLaneTypeClassifier.
         self.lane_type_classifier = self._try(
             lambda: LaneTypeClassifier(str(wdir / "lane_type.pt")))
+        self.lane_type_source = "trained"
+        if self.lane_type_classifier is None:
+            self.lane_type_classifier = HeuristicLaneTypeClassifier()
+            self.lane_type_source = "heuristic"
 
         # Depth (metric)
         from inference.collision import CollisionDetector, DepthAnythingV2Metric
@@ -149,6 +160,7 @@ class ADASFinalPipeline:
               f"depth={'Y' if self.depth_model else 'N'}",
               f"tracker={'Y' if self.tracker else 'N'}",
               f"tl_state={'Y' if self.tl_classifier else 'HSV-fallback'}",
+              f"lane_type={self.lane_type_source}",
               f"size_check={'KITTI-calibrated' if self.sanity_filter.focal_length_px and kitti_calib_path else ('estimated-fx (pending)' if self.depth_model else 'N (no depth)')}",
               f"conf_threshold={self.conf_threshold}")
 
@@ -360,6 +372,8 @@ def main():
         log.write(json.dumps({
             "frame": pipe._frame_idx, "lighting": r.lighting,
             "lanes_source": r.lanes_source if r.lanes is not None else None,
+            "n_lanes": len(r.lanes.polylines) if r.lanes is not None else 0,
+            "center_lane_type": r.lane_types.get("center"),
             "traffic_light": r.traffic_light,
             "overtaking": r.overtaking.name if r.overtaking else None,
             "curve_radius_m": round(radius_m, 1) if radius_m else None,
