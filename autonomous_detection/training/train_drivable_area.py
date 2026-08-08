@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import cv2
@@ -48,10 +49,15 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from models.drivable_area import DrivableNet
-
 PROJECT_ROOT = Path(__file__).parent.parent
 WEIGHTS_DIR = PROJECT_ROOT / "weights"
+
+# Running this file directly puts training/ on sys.path, not the project
+# root, which breaks the `from models...` import below.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from models.drivable_area import DrivableNet  # noqa: E402  (needs sys.path above)
 
 
 # --------------------------------------------------------------------------

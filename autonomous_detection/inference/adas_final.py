@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,9 +22,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from models.ipm import describe_radius
-
 PROJECT_ROOT = Path(__file__).parent.parent
+
+# Running this file directly (`python inference/adas_final.py ...`) puts
+# `inference/` on sys.path, NOT the project root — so `from models...` and
+# `from inference...` imports below would fail with ModuleNotFoundError.
+# Add the project root so the same file works both as a script and as an
+# importable module.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from models.ipm import describe_radius  # noqa: E402  (needs sys.path above)
 
 CLASS_NAMES = {
     0: "car", 1: "truck", 2: "bus", 3: "van", 4: "pedestrian", 5: "cyclist",

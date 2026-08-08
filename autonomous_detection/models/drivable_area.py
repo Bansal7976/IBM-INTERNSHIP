@@ -64,7 +64,16 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from models.lane_detector import LaneResult
+# Running this file directly puts models/ on sys.path, not the project root,
+# which breaks the `from models...` import below. Add the project root so the
+# file works both as a script (`python models/drivable_area.py img.jpg`) and
+# as an importable module.
+import sys
+_PROJECT_ROOT = Path(__file__).parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from models.lane_detector import LaneResult  # noqa: E402  (needs sys.path above)
 
 try:
     import torch

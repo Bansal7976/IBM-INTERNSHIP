@@ -303,7 +303,54 @@ def test_sanity_filter():
 
 
 # --------------------------------------------------------------------------
-# 7. CLRNet coordinate-scaling regression test (no GPU/weights needed —
+# 7. Entry points actually run as scripts.
+#
+#    REGRESSION TEST for a real bug this suite originally MISSED: every test
+#    above imports modules with PROJECT_ROOT already on sys.path (this file
+#    inserts it at the top), so `from models...` always resolved here — but
+#    `python inference/adas_final.py ...` puts inference/ on sys.path instead
+#    of the project root, and crashed instantly with ModuleNotFoundError on
+#    a real HPC run. Testing imports is NOT the same as testing the command
+#    people actually type, so this launches each entry point as a real
+#    subprocess the way a user would.
+# --------------------------------------------------------------------------
+
+def test_entry_points_run_as_scripts():
+    import subprocess
+
+    # (path, args) — args chosen to exit fast without needing weights/data
+    entry_points = [
+        ("inference/adas_final.py", ["--help"]),
+        ("training/train_drivable_area.py", ["--help"]),
+        ("training/train_aux_classifiers.py", ["--help"]),
+        ("models/ipm.py", []),
+        ("inference/tracker.py", []),
+        ("data/prepare_idd.py", ["--help"]),
+        ("data/prepare_driveindia.py", ["--help"]),
+        ("data/prepare_uvh26.py", ["--help"]),
+        ("data/prepare_merged.py", ["--help"]),
+    ]
+
+    for rel_path, args in entry_points:
+        script = PROJECT_ROOT / rel_path
+        if not script.exists():
+            check(f"entry point: {rel_path} exists", False, "file missing")
+            continue
+        proc = subprocess.run(
+            [sys.executable, str(script), *args],
+            cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=120)
+        combined = proc.stdout + proc.stderr
+        # We only care that it doesn't die on an import-resolution error.
+        # Non-zero exit from e.g. a missing dataset path is fine here.
+        broke_on_import = ("ModuleNotFoundError" in combined
+                           or "ImportError" in combined)
+        check(f"entry point runs as script: python {rel_path}",
+              not broke_on_import,
+              combined.strip().splitlines()[-1] if broke_on_import else "")
+
+
+# --------------------------------------------------------------------------
+# 8. CLRNet coordinate-scaling regression test (no GPU/weights needed —
 #    exercises the exact arithmetic that was buggy)
 # --------------------------------------------------------------------------
 
@@ -351,6 +398,8 @@ def main():
         ("Drivable-area fallback (unmarked-road lane substitute)", test_drivable_area),
         ("Overtaking decision rules", test_overtaking),
         ("Sanity filter (phantom-detection geometric check)", test_sanity_filter),
+        ("Entry points run as real scripts (import-path regression)",
+         test_entry_points_run_as_scripts),
         ("CLRNet coordinate-scaling regression", test_clrnet_coord_scaling),
     ]:
         print(f"\n--- {name} ---")
