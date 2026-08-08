@@ -183,9 +183,19 @@ def load_lane_detector(prefer: str = "clrnet", **kwargs):
         if prefer == "clrnet":
             return CLRNetWrapper(str(weights_dir / "clrnet_r101_culane.pth"), **kwargs)
         return UFLDv2Wrapper(str(weights_dir / "ufldv2_culane_res34.pth"), **kwargs)
-    except (ImportError, FileNotFoundError) as e:
-        print(f"[lane_detector] {prefer} unavailable ({e}); trying fallback")
+    except Exception as e:
+        # BUG FIX: this used to catch only (ImportError, FileNotFoundError).
+        # On the HPC cluster CLRNet raised AttributeError (mmcv 2.x removed
+        # mmcv.jit — see models/mmcv_compat.py), which escaped
+        # this handler and crashed the WHOLE pipeline instead of degrading
+        # to the fallback. A third-party research repo can fail at import or
+        # construction time in many ways (missing CUDA ops, version skew,
+        # config drift), so catch broadly here: an unavailable OPTIONAL lane
+        # model must never take the pipeline down with it.
+        print(f"[lane_detector] {prefer} unavailable "
+              f"({type(e).__name__}: {e}); trying fallback")
         if prefer == "clrnet":
             return load_lane_detector("ufldv2", **kwargs)
-        print("[lane_detector] No lane model available — lane features disabled")
+        print("[lane_detector] No lane model available — lane features "
+              "disabled (adas_final.py will use the drivable-area fallback)")
         return None

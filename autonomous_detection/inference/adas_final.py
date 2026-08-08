@@ -83,7 +83,10 @@ class ADASFinalPipeline:
         # models/drivable_area.py for the full rationale.
         from models.lane_detector import load_lane_detector
         from models.drivable_area import DrivableAreaSegmenter
-        self.lanes_model = load_lane_detector("clrnet")
+        # Wrapped in _try like every other optional module: lane detection is
+        # nice-to-have, not required (the drivable-area fallback below covers
+        # for it), so a failure here must not abort pipeline construction.
+        self.lanes_model = self._try(lambda: load_lane_detector("clrnet"))
         da_weights = wdir / "drivable_area.pth"
         self.drivable_area = self._try(
             lambda: DrivableAreaSegmenter(str(da_weights) if da_weights.exists() else None))
