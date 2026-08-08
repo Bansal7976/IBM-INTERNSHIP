@@ -538,35 +538,53 @@ def test_heuristic_lane_type():
 # --------------------------------------------------------------------------
 
 def test_clrnet_coord_scaling():
-    w0 = 1242  # typical KITTI image width
+    # Calls the REAL remap_to_frame. The previous version of this test
+    # reimplemented the arithmetic locally and asserted against its own copy —
+    # which is why it passed green while the actual wrapper stayed broken on
+    # the cluster. Test the shipped function, not a paraphrase of it.
+    from models.lane_detector import CLRNetWrapper
+    remap = CLRNetWrapper.remap_to_frame
 
-    def old_buggy_scale(pts, w0):
-        pts = pts.copy()
-        pts[:, 0] *= w0 / 1.0 if pts[:, 0].max() > 2 else w0
-        return pts
+    ORI_W, ORI_H, CUT = 1640, 590, 270      # CULane space CLRNet reports in
+    FW, FH = 848, 480                        # the actual cluster video
 
-    def fixed_scale(pts, w0):
-        pts = pts.copy()
-        if pts[:, 0].max() <= 2:
-            pts[:, 0] *= w0
-        return pts
+    # A lane as CLRNet actually returns it: CULane pixels, y within the crop.
+    culane_pts = np.array([[820.0, 590.0], [820.0, 430.0], [820.0, 270.0],
+                           [1640.0, 590.0], [0.0, 270.0]])
+    out = remap(culane_pts, FW, FH, ORI_W, ORI_H, CUT)
 
-    # Case: model already returned pixel-space coords (max > 2)
-    pixel_pts = np.array([[100.0, 10.0], [500.0, 400.0]])
-    buggy_out = old_buggy_scale(pixel_pts, w0)
-    fixed_out = fixed_scale(pixel_pts, w0)
+    check("clrnet remap: CULane-space points land INSIDE the video frame "
+          "(this is the bug that made lane-type 'unknown' on 3604/3604 frames)",
+          out[:, 0].max() <= FW and out[:, 1].max() <= FH,
+          f"max x={out[:, 0].max():.1f} (frame {FW}), max y={out[:, 1].max():.1f} (frame {FH})")
 
-    check("clrnet coord bug: OLD code blows up already-pixel-space coords "
-          "(documenting the bug that was fixed)",
-          buggy_out[:, 0].max() > w0 * 10)
-    check("clrnet coord fix: FIXED code leaves pixel-space coords unchanged",
-          np.allclose(fixed_out, pixel_pts))
+    # Horizontal centre must stay the horizontal centre.
+    check("clrnet remap: x maps proportionally (CULane centre -> frame centre)",
+          abs(out[0, 0] - FW / 2) < 1.0, f"got x={out[0, 0]:.2f}, expected {FW/2}")
 
-    # Case: model returned normalized coords (<=1) -> should scale up to pixels
-    norm_pts = np.array([[0.1, 10.0], [0.9, 400.0]])
-    fixed_norm = fixed_scale(norm_pts, w0)
-    check("clrnet coord fix: normalized coords still get scaled to pixel space",
-          fixed_norm[:, 0].max() > 100 and fixed_norm[:, 0].max() <= w0)
+    # y must map THROUGH the crop, not the full height: the cut row stays put
+    # and the bottom row stays the bottom row.
+    check("clrnet remap: y at the cut line is unchanged",
+          abs(out[2, 1] - CUT) < 1.0, f"got y={out[2, 1]:.2f}, expected {CUT}")
+    check("clrnet remap: y at the image bottom maps to the frame bottom",
+          abs(out[0, 1] - FH) < 1.0, f"got y={out[0, 1]:.2f}, expected {FH}")
+    check("clrnet remap: y midway through the crop stays midway",
+          abs(out[1, 1] - (CUT + (FH - CUT) / 2)) < 1.0,
+          f"got y={out[1, 1]:.2f}, expected {CUT + (FH - CUT) / 2}")
+
+    # Documents the old failure: unscaled CULane coords are far outside frame.
+    check("clrnet remap: WITHOUT remapping the raw coords overflow the frame "
+          "(documents the original defect)",
+          culane_pts[:, 0].max() > FW * 1.5)
+
+    # Normalized output (other CLRNet configs/versions) must still work.
+    norm_pts = np.array([[0.5, 0.0], [0.5, 1.0]])
+    out_norm = remap(norm_pts, FW, FH, ORI_W, ORI_H, CUT)
+    check("clrnet remap: normalized coords still map into the frame",
+          abs(out_norm[0, 0] - FW / 2) < 1.0
+          and abs(out_norm[0, 1] - CUT) < 1.0
+          and abs(out_norm[1, 1] - FH) < 1.0,
+          f"got {out_norm.tolist()}")
 
 
 def main():
