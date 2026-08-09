@@ -18,21 +18,47 @@
 #PBS -j oe
 #PBS -V
 
-set -uo pipefail
-cd "$PBS_O_WORKDIR"
+# NOTE: deliberately NOT using `set -u`. `conda activate` references variables
+# (PS1 among others) that are unset in a non-interactive batch shell, and under
+# `set -u` the activation aborts silently, leaving /bin/python on PATH instead
+# of the environment's interpreter. Step 1 failed exactly that way.
+set -o pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+
 source /home/soft/anaconda3/etc/profile.d/conda.sh
 conda activate auto_det
-# Required: the `yolo` console entry point used below is not on PATH inside a
-# batch job without these, even though the interpreter itself is. Step 1 failed
-# on exactly this for `pip` and `huggingface-cli`.
-# `${VAR:-}` because `set -u` treats a reference to an unset PYTHONPATH as a
-# fatal error, and it is normally unset in a fresh batch shell.
-export PATH="$HOME/.local/bin:${PATH:-}"
-export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:${PYTHONPATH:-}"
+# The `yolo` console entry point used below is not on PATH inside a batch job
+# without these, even when the interpreter itself is.
+export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-echo "sanity: python -> $(command -v python || echo NOT FOUND)"
-echo "sanity: yolo   -> $(command -v yolo   || echo NOT FOUND)"
+echo "python : $(command -v python)"
+echo "yolo   : $(command -v yolo || echo 'NOT FOUND')"
+
+# Abort immediately if the environment did not activate, rather than failing
+# confusingly once training has already been queued.
+case "$(command -v python)" in
+    *auto_det*|*anaconda3*) echo "conda environment: OK" ;;
+    *) echo "ERROR: python resolved to $(command -v python), not the auto_det"
+       echo "environment. 'conda activate auto_det' did not take effect."
+       exit 1 ;;
+esac
+
+# Every input this job needs must already exist from step 1.
+for required in \
+    runs/final/yolo11x_merged-2/weights/best.pt \
+    data/uvh26_testonly/uvh26_test.yaml \
+    data/merged_india_yolo/merged.yaml
+do
+    if [ ! -e "$required" ]; then
+        echo "ERROR: missing $required"
+        echo "Run training/pbs/india_step1_prepare.pbs first and let it finish."
+        exit 1
+    fi
+done
+echo "inputs : all present"
 
 BASE=runs/final/yolo11x_merged-2/weights/best.pt
 TEST=data/uvh26_testonly/uvh26_test.yaml
