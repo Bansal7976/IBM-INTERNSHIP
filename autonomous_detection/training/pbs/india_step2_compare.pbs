@@ -16,7 +16,10 @@
 #PBS -l walltime=24:00:00
 #PBS -o /home/krish.123449/logs/india_step2.log
 #PBS -j oe
-#PBS -V
+#
+# NOTE: `#PBS -V` is deliberately ABSENT — it exports the submitting shell's
+# CONDA_PREFIX/CONDA_SHLVL, after which `conda activate` believes the shell is
+# already activated and does nothing. See step 1 for the full explanation.
 
 # NOTE: deliberately NOT using `set -u`. `conda activate` references variables
 # (PS1 among others) that are unset in a non-interactive batch shell, and under
@@ -28,6 +31,20 @@ cd "$PBS_O_WORKDIR" || exit 1
 
 source /home/soft/anaconda3/etc/profile.d/conda.sh
 conda activate auto_det
+
+# Fallback if activation did not take effect — put the environment's bin on
+# PATH directly, bypassing conda's shell machinery.
+case "$(command -v python)" in
+    *auto_det*) ;;
+    *)
+        ENV_BIN="$(conda info --base 2>/dev/null)/envs/auto_det/bin"
+        if [ -x "$ENV_BIN/python" ]; then
+            echo "conda activate did not take effect; using $ENV_BIN directly"
+            export PATH="$ENV_BIN:$PATH"
+        fi
+        ;;
+esac
+
 # The `yolo` console entry point used below is not on PATH inside a batch job
 # without these, even when the interpreter itself is.
 export PATH="$HOME/.local/bin:$PATH"
@@ -37,12 +54,12 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 echo "python : $(command -v python)"
 echo "yolo   : $(command -v yolo || echo 'NOT FOUND')"
 
-# Abort immediately if the environment did not activate, rather than failing
+# Abort immediately if the environment is still not active, rather than failing
 # confusingly once training has already been queued.
 case "$(command -v python)" in
-    *auto_det*|*anaconda3*) echo "conda environment: OK" ;;
+    *auto_det*) echo "conda environment: OK" ;;
     *) echo "ERROR: python resolved to $(command -v python), not the auto_det"
-       echo "environment. 'conda activate auto_det' did not take effect."
+       echo "environment; the project's packages are not importable."
        exit 1 ;;
 esac
 
