@@ -22,7 +22,15 @@ set -uo pipefail
 cd "$PBS_O_WORKDIR"
 source /home/soft/anaconda3/etc/profile.d/conda.sh
 conda activate auto_det
+# Required: the `yolo` console entry point used below is not on PATH inside a
+# batch job without these, even though the interpreter itself is. Step 1 failed
+# on exactly this for `pip` and `huggingface-cli`.
+export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+echo "sanity: python -> $(command -v python || echo NOT FOUND)"
+echo "sanity: yolo   -> $(command -v yolo   || echo NOT FOUND)"
 
 BASE=runs/final/yolo11x_merged-2/weights/best.pt
 TEST=data/uvh26_testonly/uvh26_test.yaml
