@@ -67,11 +67,11 @@ degrading to a weaker method rather than failing outright.
 
 ## 2. LITERATURE REVIEW
 
-> **Builder's note:** this section carries enough material for **three to four
-> slides**, not one. Suggested split — (a) the domain-gap problem and its
-> evidence, (b) component models adopted and why, (c) techniques borrowed from
-> the literature, (d) comparable systems and where we stand against them. Give
-> the surveyed-work tables room; a technical audience reads them.
+> **Builder's note — 10-slide deck:** this section gets **one main slide**, not
+> four. Put the quotation in 2.0 and the summary table in 2.5 on it — those two
+> together show the survey drove real design decisions, which is the point.
+> Move the full tables (2.1–2.4) to **backup slides after the last numbered
+> slide**, so they can be jumped to if a question demands the detail.
 
 ### 2.0 The one quotation to put on a slide
 

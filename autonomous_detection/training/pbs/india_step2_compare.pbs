@@ -1,0 +1,133 @@
+#!/bin/bash
+# INDIA ADAPTATION — STEP 2: the controlled comparison that goes in the paper
+#
+#   (A) BASELINE : existing KITTI-trained checkpoint, scored on UVH-26 val
+#   (B) ADAPTED  : same checkpoint fine-tuned on KITTI+UVH-26, scored on the
+#                  SAME UVH-26 val split
+#
+# Both models are evaluated on one identical test set, so the difference is
+# attributable to the training data and nothing else. That delta is the result
+# the paper reports.
+#
+# Submit AFTER step 1 finishes:  qsub training/pbs/india_step2_compare.pbs
+#PBS -N India_Compare
+#PBS -l select=1:ncpus=8:ngpus=1:mem=40gb
+#PBS -q gpu
+#PBS -l walltime=24:00:00
+#PBS -o /home/krish.123449/logs/india_step2.log
+#PBS -j oe
+#PBS -V
+
+set -uo pipefail
+cd "$PBS_O_WORKDIR"
+source /home/soft/anaconda3/etc/profile.d/conda.sh
+conda activate auto_det
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+BASE=runs/final/yolo11x_merged-2/weights/best.pt
+TEST=data/uvh26_testonly/uvh26_test.yaml
+TRAIN=data/merged_india_yolo/merged.yaml
+
+echo "============================================"
+echo "  INDIA ADAPTATION — CONTROLLED COMPARISON"
+echo "  GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
+echo "  $(date)"
+echo "============================================"
+
+# =====================================================================
+echo ""
+echo "########## (A) BASELINE — KITTI-trained model on Indian test data ##########"
+echo "This is expected to score POORLY. That is the finding, not a failure:"
+echo "it quantifies the domain gap the paper is about."
+echo ""
+python - <<PY
+from ultralytics import YOLO
+m = YOLO("$BASE")
+print("model classes:", m.names)
+r = m.val(data="$TEST", imgsz=640, batch=32, device=0, split="val",
+          plots=True, project="runs/india", name="A_baseline_on_uvh26")
+print()
+print("=== (A) BASELINE — KITTI-only model, UVH-26 test ===")
+print(f"mAP@0.5      : {r.box.map50*100:.2f}%")
+print(f"mAP@0.5:0.95 : {r.box.map*100:.2f}%")
+print(f"Precision    : {r.box.mp*100:.2f}%")
+print(f"Recall       : {r.box.mr*100:.2f}%")
+PY
+
+# =====================================================================
+echo ""
+echo "########## (B) FINE-TUNE on KITTI + UVH-26 ##########"
+echo "Starting from the existing checkpoint rather than COCO weights: the"
+echo "backbone already encodes road-scene features, so only the head has to"
+echo "learn the new categories. Far cheaper than training from scratch."
+echo ""
+yolo detect train \
+  model=$BASE \
+  data=$TRAIN \
+  imgsz=640 \
+  epochs=80 \
+  patience=20 \
+  batch=16 \
+  device=0 \
+  optimizer=AdamW \
+  lr0=0.0002 \
+  lrf=0.01 \
+  cos_lr=True \
+  warmup_epochs=3 \
+  weight_decay=0.0005 \
+  mosaic=1.0 \
+  mixup=0.15 \
+  copy_paste=0.3 \
+  hsv_v=0.6 \
+  degrees=5.0 \
+  fliplr=0.5 \
+  save_period=20 \
+  workers=8 \
+  amp=True \
+  project=runs/india \
+  name=B_adapted
+
+# =====================================================================
+echo ""
+echo "########## (B) ADAPTED — scored on the SAME test set ##########"
+python - <<PY
+from ultralytics import YOLO
+m = YOLO("runs/india/B_adapted/weights/best.pt")
+r = m.val(data="$TEST", imgsz=640, batch=32, device=0, split="val",
+          plots=True, project="runs/india", name="B_adapted_on_uvh26")
+print()
+print("=== (B) ADAPTED — KITTI+UVH-26 model, same UVH-26 test ===")
+print(f"mAP@0.5      : {r.box.map50*100:.2f}%")
+print(f"mAP@0.5:0.95 : {r.box.map*100:.2f}%")
+print(f"Precision    : {r.box.mp*100:.2f}%")
+print(f"Recall       : {r.box.mr*100:.2f}%")
+print()
+print("Per-class mAP@0.5 (watch the India-specific classes):")
+for name, ap in zip(r.names.values(), r.box.ap50):
+    print(f"  {name:<18}: {ap*100:.2f}%")
+PY
+
+# =====================================================================
+echo ""
+echo "########## (C) REGRESSION CHECK — did we forget the old classes? ##########"
+echo "Scoring the adapted model on the ORIGINAL validation split. A large drop"
+echo "here would indicate catastrophic forgetting; joint training is used"
+echo "specifically to avoid it, and this check is what verifies that claim."
+echo ""
+python - <<PY
+from ultralytics import YOLO
+m = YOLO("runs/india/B_adapted/weights/best.pt")
+r = m.val(data="data/merged_yolo/merged.yaml", imgsz=640, batch=32, device=0,
+          project="runs/india", name="C_adapted_on_original")
+print()
+print("=== (C) ADAPTED model on the ORIGINAL test set ===")
+print(f"mAP@0.5      : {r.box.map50*100:.2f}%   (was 95.42% before adaptation)")
+print(f"mAP@0.5:0.95 : {r.box.map*100:.2f}%   (was 79.90% before adaptation)")
+PY
+
+echo ""
+echo "============================================"
+echo "  DONE  $(date)"
+echo "  Fill the three rows of Table IV in the paper from the"
+echo "  (A), (B) and (C) blocks above."
+echo "============================================"

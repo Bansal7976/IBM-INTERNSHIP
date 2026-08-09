@@ -1,0 +1,96 @@
+#!/bin/bash
+# INDIA ADAPTATION — STEP 1: download UVH-26, convert, build both dataset configs
+#
+# Runs on a CPU queue (no GPU needed). Compute nodes on some clusters have no
+# outbound internet; if the download step fails here, run just the download
+# section manually on the login node and re-submit with SKIP_DOWNLOAD=1.
+#
+# Submit:  qsub training/pbs/india_step1_prepare.pbs
+#PBS -N India_Prepare
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -q workq
+#PBS -o /home/krish.123449/logs/india_step1.log
+#PBS -j oe
+#PBS -V
+
+set -uo pipefail
+cd "$PBS_O_WORKDIR"
+source /home/soft/anaconda3/etc/profile.d/conda.sh
+conda activate auto_det
+
+echo "============================================"
+echo "  STEP 1 — UVH-26 download + conversion"
+echo "  $(date)"
+echo "============================================"
+
+# ---------------------------------------------------------------- download ---
+if [ "${SKIP_DOWNLOAD:-0}" != "1" ]; then
+    echo ""
+    echo "[1/4] Downloading UVH-26 from HuggingFace (CC BY 4.0, no registration)..."
+    pip install -q huggingface_hub
+    huggingface-cli download iisc-aim/UVH-26 \
+        --repo-type dataset \
+        --local-dir data/UVH26 \
+        || { echo "DOWNLOAD FAILED — likely no internet on this node."
+             echo "Run this on the LOGIN node instead, then re-submit with:"
+             echo "  qsub -v SKIP_DOWNLOAD=1 training/pbs/india_step1_prepare.pbs"
+             exit 1; }
+else
+    echo "[1/4] Download skipped (SKIP_DOWNLOAD=1)"
+fi
+
+echo ""
+echo "--- what actually landed on disk ---"
+du -sh data/UVH26 2>/dev/null
+find data/UVH26 -maxdepth 2 -type d | head -20
+find data/UVH26 -name "*.json" | head -10
+echo "images found: $(find data/UVH26 -name '*.jpg' -o -name '*.png' | wc -l)"
+
+# ------------------------------------------------------------- conversion ---
+echo ""
+echo "[2/4] Converting UVH-26 (COCO JSON) -> YOLO, unified taxonomy..."
+python data/prepare_uvh26.py --data_root data/UVH26 --out data/uvh26_yolo \
+  || { echo ""
+       echo "CONVERSION FAILED. Most likely the extracted folder layout differs"
+       echo "from what prepare_uvh26.py expects:"
+       echo "    data/UVH26/UVH-26-Train/{images/, UVH-26-MV-Train.json}"
+       echo "    data/UVH26/UVH-26-Val/{images/,   UVH-26-MV-Val.json}"
+       echo "Compare against the 'what actually landed' listing above and either"
+       echo "rename the folders or adjust the paths in prepare_uvh26.py main()."
+       exit 1; }
+
+# --------------------------------------------- build both dataset configs ---
+echo ""
+echo "[3/4] Building the two dataset configs for the controlled comparison..."
+
+# (a) ADAPTED: everything we have, including UVH-26
+python data/prepare_merged.py --out data/merged_india_yolo --uvh26 data/uvh26_yolo
+
+# (b) The UVH-26 validation split alone — this is the COMMON TEST SET that both
+#     the baseline and the adapted model are scored on. Keeping it separate is
+#     what makes the comparison meaningful rather than just "more data helped".
+mkdir -p data/uvh26_testonly
+ln -sfn "$PWD/data/uvh26_yolo/val" data/uvh26_testonly/val
+python - <<'PY'
+from pathlib import Path
+names = {0:"car",1:"truck",2:"bus",3:"van",4:"pedestrian",5:"cyclist",
+         6:"motorcycle",7:"tram",8:"traffic_light",9:"traffic_sign",10:"misc",
+         11:"autorickshaw",12:"animal",13:"rider",14:"vehicle_fallback"}
+out = Path("data/uvh26_testonly")
+body = "\n".join(f"  {k}: {v}" for k, v in names.items())
+(out / "uvh26_test.yaml").write_text(
+    f"# UVH-26 validation split — the common test set for the India comparison\n"
+    f"path: {out.resolve()}\ntrain: val/images\nval: val/images\nnames:\n{body}\n")
+print("wrote", out / "uvh26_test.yaml")
+PY
+
+echo ""
+echo "[4/4] Summary"
+echo "  UVH-26 train imgs : $(ls data/uvh26_yolo/train/images 2>/dev/null | wc -l)"
+echo "  UVH-26 val imgs   : $(ls data/uvh26_yolo/val/images   2>/dev/null | wc -l)"
+echo "  merged train imgs : $(ls data/merged_india_yolo/train/images 2>/dev/null | wc -l)"
+echo ""
+echo "Next:  qsub training/pbs/india_step2_compare.pbs"
+echo "============================================"
+echo "  STEP 1 DONE  $(date)"
+echo "============================================"
