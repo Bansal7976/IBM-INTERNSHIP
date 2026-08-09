@@ -20,8 +20,10 @@ conda activate auto_det
 # These two exports are what the project's other working PBS scripts use; the
 # environment's console entry points (pip, huggingface-cli) are not otherwise
 # on PATH for compute nodes.
-export PATH="$HOME/.local/bin:$PATH"
-export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
+# `${VAR:-}` because `set -u` treats a reference to an unset PYTHONPATH as a
+# fatal error, and it is normally unset in a fresh batch shell.
+export PATH="$HOME/.local/bin:${PATH:-}"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:${PYTHONPATH:-}"
 
 echo "============================================"
 echo "  STEP 1 — UVH-26 download + conversion"
