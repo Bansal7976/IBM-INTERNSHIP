@@ -17,24 +17,41 @@ set -uo pipefail
 cd "$PBS_O_WORKDIR"
 source /home/soft/anaconda3/etc/profile.d/conda.sh
 conda activate auto_det
+# These two exports are what the project's other working PBS scripts use; the
+# environment's console entry points (pip, huggingface-cli) are not otherwise
+# on PATH for compute nodes.
+export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
 
 echo "============================================"
 echo "  STEP 1 — UVH-26 download + conversion"
 echo "  $(date)"
 echo "============================================"
+echo "python: $(command -v python || echo NOT FOUND)"
 
 # ---------------------------------------------------------------- download ---
+# Invoked through `python -m` and the huggingface_hub Python API rather than the
+# `pip` / `huggingface-cli` console scripts, because those entry points are not
+# reliably on PATH inside a batch job even when the interpreter is.
 if [ "${SKIP_DOWNLOAD:-0}" != "1" ]; then
     echo ""
     echo "[1/4] Downloading UVH-26 from HuggingFace (CC BY 4.0, no registration)..."
-    pip install -q huggingface_hub
-    huggingface-cli download iisc-aim/UVH-26 \
-        --repo-type dataset \
-        --local-dir data/UVH26 \
-        || { echo "DOWNLOAD FAILED — likely no internet on this node."
-             echo "Run this on the LOGIN node instead, then re-submit with:"
-             echo "  qsub -v SKIP_DOWNLOAD=1 training/pbs/india_step1_prepare.pbs"
-             exit 1; }
+    python -m pip install -q huggingface_hub || {
+        echo "Could not install huggingface_hub. If this is a network error, do"
+        echo "the download on the LOGIN node and re-submit with SKIP_DOWNLOAD=1."
+        exit 1; }
+
+    python - <<'PY' || { echo ""
+        echo "DOWNLOAD FAILED. If the traceback above shows a connection or DNS"
+        echo "error, this compute node has no outbound internet: run the same"
+        echo "snapshot_download on the LOGIN node, then re-submit with"
+        echo "  qsub -v SKIP_DOWNLOAD=1 training/pbs/india_step1_prepare.pbs"
+        exit 1; }
+from huggingface_hub import snapshot_download
+p = snapshot_download(repo_id="iisc-aim/UVH-26", repo_type="dataset",
+                      local_dir="data/UVH26", max_workers=8)
+print("downloaded to:", p)
+PY
 else
     echo "[1/4] Download skipped (SKIP_DOWNLOAD=1)"
 fi
