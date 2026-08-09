@@ -11,7 +11,12 @@
 #PBS -q workq
 #PBS -o /home/krish.123449/logs/india_step1.log
 #PBS -j oe
-#PBS -V
+#
+# NOTE: `#PBS -V` is deliberately ABSENT. It exports the submitting shell's
+# entire environment to the compute node, including CONDA_PREFIX and
+# CONDA_SHLVL from the conda env active at submission time. `conda activate`
+# then sees a shell it believes is already activated and does nothing, leaving
+# /bin/python on PATH. The project's other working PBS scripts omit -V.
 
 # NOTE: deliberately NOT using `set -u`. `conda activate` references variables
 # (PS1 among others) that are unset in a non-interactive batch shell, and under
@@ -25,6 +30,22 @@ cd "$PBS_O_WORKDIR" || exit 1
 
 source /home/soft/anaconda3/etc/profile.d/conda.sh
 conda activate auto_det
+
+# Fallback: if activation did not take effect for any reason, put the
+# environment's bin directory on PATH directly. This bypasses conda's shell
+# machinery entirely and is what actually matters — having the right
+# interpreter first on PATH.
+case "$(command -v python)" in
+    *auto_det*) ;;
+    *)
+        ENV_BIN="$(conda info --base 2>/dev/null)/envs/auto_det/bin"
+        if [ -x "$ENV_BIN/python" ]; then
+            echo "conda activate did not take effect; using $ENV_BIN directly"
+            export PATH="$ENV_BIN:$PATH"
+        fi
+        ;;
+esac
+
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
 
@@ -35,18 +56,19 @@ echo "============================================"
 echo "python : $(command -v python)"
 echo "version: $(python --version 2>&1)"
 
-# Fail fast and loudly if the environment did not activate — this was the
-# original failure mode and it is silent otherwise.
+# Abort loudly if we still do not have the environment's interpreter, rather
+# than continuing and failing confusingly several steps later.
 case "$(command -v python)" in
-    *auto_det*|*anaconda3*)
+    *auto_det*)
         echo "conda environment: OK"
         ;;
     *)
         echo ""
-        echo "ERROR: python resolved to $(command -v python), not the auto_det"
-        echo "environment. 'conda activate auto_det' did not take effect, so"
-        echo "none of the project's packages are importable. Aborting rather"
-        echo "than failing confusingly several steps later."
+        echo "ERROR: python resolved to $(command -v python), which is not the"
+        echo "auto_det environment, so the project's packages are not"
+        echo "importable. Both 'conda activate auto_det' and the direct-PATH"
+        echo "fallback failed. Check that $(conda info --base 2>/dev/null)/envs/auto_det"
+        echo "exists and is readable from this compute node."
         exit 1
         ;;
 esac
