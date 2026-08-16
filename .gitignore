@@ -1,10 +1,13 @@
-ï»¿# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*.class
+*$py.class
+
+# C extensions
 *.so
+
+# Distribution / packaging
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -16,34 +19,59 @@ lib64/
 parts/
 sdist/
 var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
 
 # Virtual environments
 venv/
-.env/
-env/
 ENV/
+env/
+.venv
 
 # IDEs
-.idea/
 .vscode/
+.idea/
 *.swp
 *.swo
+*~
+.DS_Store
 
-# Project specific (from both branches)
-autonomous_detection/data/kitti/
-autonomous_detection/data/kitti_yolo/
-autonomous_detection/data/nuscenes/
-autonomous_detection/data/nuscenes_yolo/
-autonomous_detection/runs/
-results/
-
-# Data files (large) - keep the .py preparation scripts, ignore dataset content
+# Data files (large) — keep the .py preparation scripts, ignore dataset content
 autonomous_detection/data/*
 !autonomous_detection/data/*.py
-!autonomous_detection/data/*_local.py
 data/kitti*/
 data/nuscenes*/
 data/bdd100k*/
@@ -61,22 +89,11 @@ data/*_crops/
 checkpoints/
 *.pth
 *.pt
-*.onnx
-*.engine
-*.mp4
-*.avi
-*.mov
-*.jpg
-*.jpeg
-*.png
-!autonomous_detection/configs/yolov11/yolov11_kitti.yaml
+*.ckpt
 
 # Logs
 logs/
 *.log
-
-# Jupyter
-.ipynb_checkpoints/
 
 # Mac
 .DS_Store
@@ -92,3 +109,12 @@ external/
 *.mp4
 *.engine
 *.onnx
+
+# LaTeX build artifacts
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.lof
+paper/*.lot
+paper/preview/
