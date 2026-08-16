@@ -11,11 +11,40 @@ confirmation — see `CITATIONS_VERIFIED.md`)*
 
 ## Files
 
-| File | What it is |
-|---|---|
-| `adas_paper.tex` | The paper. IEEE conference format (IEEEtran), ~6–7 pages compiled |
-| `CITATIONS_VERIFIED.md` | Verification record for all 14 references, plus three items needing your action |
-| `figures/` | Result images referenced by the paper (add from the results bundle) |
+Two documents are provided. They share the same research content and the same
+verified reference list, but serve different purposes.
+
+| File | What it is | Pages |
+|---|---|---|
+| **`project_report.pdf`** | Full project report — title page, contents, list of figures and tables, abstract, six chapters, references. Plain black on white, no coloured panels. **This is the submission document.** | 22 |
+| **`adas_paper.pdf`** | The same work condensed into IEEE conference format, for submission to a venue | 6 |
+| `project_report.tex` / `adas_paper.tex` | Sources for both, if you need to edit | — |
+| `CITATIONS_VERIFIED.md` | Verification record for all 14 references, plus three items needing your action | — |
+| `figures/` | The five result images both documents embed | — |
+
+Both PDFs are already compiled and included — you do not need LaTeX to read or
+submit them. The sections below are only needed if you edit the sources.
+
+### What the report contains
+
+```
+Title page
+Contents · List of Figures · List of Tables
+Abstract
+1  Introduction          background, problem statement, objectives, scope
+2  Literature Review     domain shift, component architectures, synthesis,
+                         research gaps
+3  System Architecture   the six-stage pipeline diagram, degradation contract
+4  Methodology           collision estimation, plausibility filtering,
+                         curvature in physical units, overtaking verdict
+5  Data Pipeline         preprocessing, label space, training configuration,
+                         verification procedure
+6  Results               per-class accuracy, training progression, end-to-end
+                         pipeline, plausibility filter
+7  Limitations           four items, each traced to its cause
+8  Conclusion and Future Work
+References                14 entries
+```
 
 ## How to compile
 
@@ -37,15 +66,19 @@ pdflatex adas_paper.tex     # run twice so references resolve
 
 ---
 
-## ⚠ THE PAPER CONTAINS PLACEHOLDER NUMBERS — READ THIS FIRST
+## ⚠ THE IEEE PAPER CONTAINS PLACEHOLDER NUMBERS — READ THIS FIRST
 
-Section VI-E (*Adaptation to Unstructured Traffic*) and Table IV are **written
-but not yet measured**. Every value there is `XX.X`. The section is marked with
-a `TODO(authors)` comment in the `.tex`.
+This applies to **`adas_paper.pdf` / `adas_paper.tex` only**. The project
+report (`project_report.pdf`) contains no placeholders and is ready as-is.
 
-**Do not submit while those placeholders are present.** Either run the
-experiment below and fill them in, or delete the subsection, Table IV, and the
-sentences in Limitations and Conclusion that reference `\ref{sec:india}`.
+Section VI-E of the IEEE paper (*Adaptation to Unstructured Traffic*) and its
+Table IV are **written but not yet measured** — every value is `XX.X`, and the
+section carries a `TODO(authors)` comment in the source.
+
+**Do not submit the IEEE paper while those placeholders are present.** Either
+run the experiment below and fill them in, or delete the subsection, Table IV,
+and the sentences in Limitations and Conclusion that reference
+`\ref{sec:india}`.
 
 ### Running the adaptation experiment
 
