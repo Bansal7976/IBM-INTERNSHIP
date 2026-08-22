@@ -1,0 +1,114 @@
+#!/bin/bash
+# GRANULARITY EXPERIMENT — STEP 3: the comparison that goes in the paper
+#
+# Scores all three models in ONE common space -- the six decision groups --
+# regardless of the label space each was trained on. A fine-grained model's
+# "tanker" is projected to HEAVY_VEHICLE before scoring, so every model answers
+# the same question: did you identify the object at the granularity the
+# decision layer actually consumes?
+#
+# This is what makes the comparison fair. Native mAP does not: fewer classes is
+# an easier problem, so the 6-class model would win by construction and the
+# result would mean nothing.
+#
+# Submit only after all three trainings have finished:
+#   qsub training/pbs/granularity_step3_compare.pbs
+#PBS -N Gran_Compare
+#PBS -l select=1:ncpus=8:ngpus=1:mem=40gb
+#PBS -q gpu
+#PBS -l walltime=06:00:00
+#PBS -o /home/krish.123449/logs/gran_step3.log
+#PBS -j oe
+#
+# NOTE: `#PBS -V` is deliberately ABSENT — see step 1.
+
+set -o pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+
+source /home/soft/anaconda3/etc/profile.d/conda.sh
+conda activate auto_det
+
+case "$(command -v python)" in
+    *auto_det*) ;;
+    *)
+        ENV_BIN="$(conda info --base 2>/dev/null)/envs/auto_det/bin"
+        if [ -x "$ENV_BIN/python" ]; then
+            echo "conda activate did not take effect; using $ENV_BIN directly"
+            export PATH="$ENV_BIN:$PATH"
+        fi
+        ;;
+esac
+
+export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+echo "python : $(command -v python)"
+case "$(command -v python)" in
+    *auto_det*) echo "conda environment: OK" ;;
+    *) echo "ERROR: python resolved to $(command -v python), not auto_det"; exit 1 ;;
+esac
+
+for LEVEL in fine semantic decision; do
+    for required in "runs/granularity/$LEVEL/weights/best.pt" \
+                    "data/gran_$LEVEL/$LEVEL.yaml"; do
+        if [ ! -e "$required" ]; then
+            echo "ERROR: missing $required"
+            echo "All three trainings must finish before this job runs."
+            exit 1
+        fi
+    done
+done
+echo "inputs : all three models present"
+
+# Every model is evaluated on the SAME held-out images. Each *.yaml points at
+# the same underlying frames -- only the labels differ -- so this is one test
+# set seen three ways, not three test sets.
+echo "============================================"
+echo "  GRANULARITY COMPARISON — COMMON DECISION SPACE"
+echo "  GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
+echo "  $(date)"
+echo "============================================"
+
+mkdir -p results
+
+python evaluation/evaluate_swmc.py --compare \
+    "fine=runs/granularity/fine/weights/best.pt:data/gran_fine/fine.yaml" \
+    "semantic=runs/granularity/semantic/weights/best.pt:data/gran_semantic/semantic.yaml" \
+    "decision=runs/granularity/decision/weights/best.pt:data/gran_decision/decision.yaml" \
+    --imgsz 640 \
+    --conf 0.25 \
+    --iou 0.5 \
+    --out results/granularity_comparison.json || exit 1
+
+# A second pass at a lower confidence threshold. The decision layer would
+# rather see a doubtful object than miss it, so the operating point that
+# matters for safety is not the one that maximises mAP. Reporting both shows
+# the conclusion is not an artefact of a single threshold -- the first question
+# a reviewer asks of any thresholded metric.
+echo ""
+echo "########## SENSITIVITY — same comparison at conf=0.10 ##########"
+python evaluation/evaluate_swmc.py --compare \
+    "fine=runs/granularity/fine/weights/best.pt:data/gran_fine/fine.yaml" \
+    "semantic=runs/granularity/semantic/weights/best.pt:data/gran_semantic/semantic.yaml" \
+    "decision=runs/granularity/decision/weights/best.pt:data/gran_decision/decision.yaml" \
+    --imgsz 640 \
+    --conf 0.10 \
+    --iou 0.5 \
+    --no-map \
+    --out results/granularity_comparison_conf010.json || exit 1
+
+echo ""
+echo "============================================"
+echo "  DONE  $(date)"
+echo ""
+echo "  results/granularity_comparison.json          (conf 0.25)"
+echo "  results/granularity_comparison_conf010.json  (conf 0.10)"
+echo ""
+echo "  For the paper, report from the common-space columns:"
+echo "    SWMC, critical-error rate, group accuracy, detection recall."
+echo "  Report native mAP too, but label it explicitly as NOT comparable"
+echo "  across rows — claiming otherwise is the mistake this design exists"
+echo "  to avoid."
+echo "============================================"
