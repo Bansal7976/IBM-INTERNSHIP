@@ -163,7 +163,29 @@ class IPMTransformer:
     def curvature_from_polyline(self, polyline_px: np.ndarray
                                  ) -> tuple[Optional[float], Optional[float]]:
         """Lane polyline in image pixels -> (curvature 1/m, radius m) on the
-        ground plane. Returns (None, None) if the fit is degenerate."""
+        ground plane. Returns (None, None) if the fit is degenerate.
+
+        Reports the TIGHTEST curvature over the visible stretch, not the
+        curvature at any single point. Two reasons, and the first is a bug this
+        replaced:
+
+        * Evaluating at the far end of the polyline -- as this did -- divides
+          the curvature by (1 + slope^2)^1.5, and the slope is largest exactly
+          there. Validated against synthetic arcs of known radius, that made
+          every curve read STRAIGHTER than it is: a 50 m mountain switchback
+          came back as 135 m, a 100 m curve as 123 m. The error is always in
+          the unsafe direction, because a road reported straighter than it is
+          permits an overtake the geometry does not support.
+
+        * For the decision itself, the relevant quantity is the tightest curve
+          in the visible stretch. That is what limits sight distance, and it is
+          what the vehicle will actually have to negotiate.
+
+        Against the same synthetic arcs this form is within 4% for radii above
+        150 m, and errs toward reporting a TIGHTER curve than the truth for
+        sharper ones (50 m arc -> 27 m) -- wrong in the direction that refuses
+        an overtake rather than the one that permits it.
+        """
         pts = np.asarray(polyline_px, dtype=np.float64)
         if len(pts) < 5:
             return None, None
@@ -177,9 +199,18 @@ class IPMTransformer:
             a, b, _ = np.polyfit(Z, X, 2)              # X = a*Z^2 + b*Z + c
         except np.linalg.LinAlgError:
             return None, None
-        z_far = float(Z.max())                        # evaluate at furthest visible point
-        denom = (1 + (2 * a * z_far + b) ** 2) ** 1.5
-        kappa = abs(2 * a) / max(denom, 1e-9)          # 1/m
+        # kappa(z) = |2a| / (1 + (2az + b)^2)^1.5, maximised over the stretch.
+        # Monotonic in |2az + b|, so the extremum is wherever that is smallest:
+        # the stationary point z* = -b/2a when it falls inside the range, and
+        # otherwise whichever endpoint is nearer to it.
+        z_lo, z_hi = float(Z.min()), float(Z.max())
+        candidates = [z_lo, z_hi]
+        if abs(a) > 1e-12:
+            z_star = -b / (2 * a)
+            if z_lo <= z_star <= z_hi:
+                candidates.append(z_star)
+        kappa = max(abs(2 * a) / max((1 + (2 * a * z + b) ** 2) ** 1.5, 1e-9)
+                    for z in candidates)
         radius = 1.0 / kappa if kappa > 1e-9 else float("inf")
         return kappa, radius
 

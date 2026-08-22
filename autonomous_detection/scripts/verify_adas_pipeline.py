@@ -176,6 +176,94 @@ def test_ipm():
 #    trained and have nothing to fit a curve to there).
 # --------------------------------------------------------------------------
 
+def test_curvature_metric_accuracy():
+    """Does the metric curve radius actually recover a known radius?
+
+    The overtaking rule refuses a manoeuvre when the road's radius falls below
+    150 m, so the estimate is load-bearing. Until now it was never checked
+    against a known answer -- only that a curved polyline scored tighter than a
+    straight one, which any monotone function would satisfy.
+
+    Here arcs of known radius are projected through the ground-plane homography
+    into image pixels and recovered. The property that matters is not raw
+    accuracy but the DIRECTION of the error: reporting a road straighter than
+    it is permits an overtake the geometry does not support.
+    """
+    from models.ipm import IPMTransformer
+
+    fx = fy = 1280 / (2 * np.tan(np.deg2rad(60) / 2))
+    ipm = IPMTransformer.from_intrinsics(fx, fy, 640, 360,
+                                         camera_height_m=1.5, pitch_deg=5.0)
+    ground_to_image = np.linalg.inv(ipm.H)
+
+    def arc_pixels(radius_m, n=25):
+        """Circular arc of the given radius, tangent to the forward axis."""
+        # An arc of radius R spans only Z <= R before it turns back, so a
+        # tighter curve is visible over a shorter stretch -- as on a real
+        # switchback.
+        z_far = min(45.0, 0.85 * radius_m)
+        Z = np.linspace(min(5.0, 0.2 * z_far), z_far, n)
+        X = radius_m - np.sqrt(np.maximum(radius_m ** 2 - Z ** 2, 0.0))
+        g = np.stack([X, Z, np.ones_like(Z)], axis=1) @ ground_to_image.T
+        return g[:, :2] / g[:, 2:3]
+
+    errors = {}
+    for R in (25, 30, 50, 75, 100, 150, 200, 400, 1000):
+        _, got = ipm.curvature_from_polyline(arc_pixels(R))
+        errors[R] = None if got is None else (got - R) / R
+
+    check("curvature: every known arc from 25 m to 1000 m is recovered",
+          all(v is not None for v in errors.values()), str(errors))
+    check("curvature: NO radius is over-reported by more than 5% -- an error "
+          "toward 'straighter than it is' permits an unsupported overtake",
+          all(v is not None and v <= 0.05 for v in errors.values()),
+          str({k: f"{v*100:+.0f}%" for k, v in errors.items() if v is not None}))
+    check("curvature: accurate to within 5% at and above the 150 m decision "
+          "threshold, where the rule actually switches",
+          all(abs(errors[R]) <= 0.05 for R in (150, 200, 400, 1000)),
+          str({R: f"{errors[R]*100:+.0f}%" for R in (150, 200, 400, 1000)}))
+    check("curvature: tighter arcs err toward reporting a SHARPER curve, "
+          "which refuses an overtake rather than permitting one",
+          errors[50] < 0 and errors[75] < 0 and errors[100] < 0,
+          str({R: f"{errors[R]*100:+.0f}%" for R in (50, 75, 100)}))
+    check("curvature: monotone -- a tighter true radius never reports a larger "
+          "radius than a gentler one",
+          all(_recover(ipm, arc_pixels, a) <= _recover(ipm, arc_pixels, b)
+              for a, b in zip((50, 75, 100, 150, 200), (75, 100, 150, 200, 400))))
+
+    straight = np.stack([np.zeros(25), np.linspace(5, 45, 25), np.ones(25)],
+                        axis=1) @ ground_to_image.T
+    _, r_straight = ipm.curvature_from_polyline(straight[:, :2] / straight[:, 2:3])
+    check("curvature: a perfectly straight road reads as effectively infinite",
+          r_straight is not None and r_straight > 10_000, str(r_straight))
+
+    # Document the defect this replaced: evaluating curvature at the FAR end of
+    # the polyline divides it by (1 + slope^2)^1.5, and the slope peaks exactly
+    # there. Reintroduced locally so the test fails if the old form returns.
+    def far_end_radius(polyline):
+        g = ipm.pixel_to_ground(np.asarray(polyline, dtype=np.float64))
+        X, Z = g[:, 0], g[:, 1]
+        o = np.argsort(Z)
+        Z, X = Z[o], X[o]
+        a, b, _ = np.polyfit(Z, X, 2)
+        z = float(Z.max())
+        k = abs(2 * a) / max((1 + (2 * a * z + b) ** 2) ** 1.5, 1e-9)
+        return 1.0 / k if k > 1e-9 else float("inf")
+
+    old_150 = far_end_radius(arc_pixels(150))
+    check("curvature: the previous far-end formulation over-reported the "
+          "radius (documents the defect this fix removes)",
+          old_150 > 150 * 1.05, f"old formulation gave {old_150:.0f} m for a 150 m arc")
+    check("curvature: the current formulation does NOT share that bias",
+          _recover(ipm, arc_pixels, 150) <= 150 * 1.05,
+          f"{_recover(ipm, arc_pixels, 150):.0f} m for a 150 m arc")
+
+
+def _recover(ipm, arc_fn, radius_m) -> float:
+    _, got = ipm.curvature_from_polyline(arc_fn(radius_m))
+    return float("inf") if got is None else float(got)
+
+
 def test_drivable_area():
     from models.drivable_area import DrivableAreaSegmenter
 
@@ -1113,6 +1201,8 @@ def main():
         ("Tracker", test_tracker),
         ("Collision / TTC", test_collision),
         ("IPM ground-plane curvature", test_ipm),
+        ("Metric curve radius vs known-radius arcs",
+         test_curvature_metric_accuracy),
         ("Drivable-area fallback (unmarked-road lane substitute)", test_drivable_area),
         ("Overtaking decision rules", test_overtaking),
         ("Rear-view overtaking (IRC:66 window + sensor-range honesty)",
