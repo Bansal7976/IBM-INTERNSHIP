@@ -41,6 +41,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 PASS, FAIL = [], []
 
 
+def _raises(fn) -> bool:
+    """True if calling fn() raises — used to assert that bad input is rejected."""
+    try:
+        fn()
+    except Exception:
+        return True
+    return False
+
+
 def check(name: str, cond: bool, detail: str = ""):
     (PASS if cond else FAIL).append(name)
     tag = "PASS" if cond else "FAIL"
@@ -241,15 +250,44 @@ def test_overtaking():
     check("overtaking: unlit darkness -> NOT_POSSIBLE_LOW_VIS",
           status == OvertakeStatus.NOT_POSSIBLE_LOW_VIS, f"got {status}")
 
-    # Case D: fast oncoming vehicle close enough to matter -> blocked
-    oncoming = FakeDet((150, 300, 210, 360), 0.9, 0, "car")   # left of center -> oncoming lane
-    oncoming.track_id = 99
-    oncoming.depth_speed_mps = 25.0   # approaching fast (post-bugfix telemetry)
-    status = az.analyze(lanes, {"center": "dashed"}, tracks=[oncoming],
-                         depth_map=np.full((480, 640), 40.0, dtype=np.float32),
-                         ego_speed_mps=20.0, scene_brightness=150.0, lighting_state="DAY")
-    check("overtaking: close fast oncoming vehicle -> NOT_POSSIBLE_ONCOMING",
-          status == OvertakeStatus.NOT_POSSIBLE_ONCOMING, f"got {status}")
+    # Case D: fast oncoming vehicle close enough to matter -> blocked.
+    # Run under BOTH traffic conventions. India drives on the LEFT, so the
+    # oncoming lane is to the RIGHT of the divider -- the opposite of the
+    # US/Europe convention this module originally hardcoded. A vehicle placed
+    # on the wrong side must NOT read as oncoming, or the system would ignore
+    # genuine head-on traffic while braking for cars in its own lane.
+    near_depth = np.full((480, 640), 40.0, dtype=np.float32)
+    for side_name, ego_x, onc_x in (("left (India)", 150, 500),
+                                    ("right (US/EU)", 500, 150)):
+        az_side = OvertakingAnalyzer(
+            ipm=ipm, min_gap_seconds=8.0, min_lead_gap_m=25.0,
+            traffic_side="left" if "India" in side_name else "right")
+
+        oncoming = FakeDet((onc_x, 300, onc_x + 60, 360), 0.9, 0, "car")
+        oncoming.track_id = 99
+        oncoming.depth_speed_mps = 25.0   # approaching fast
+        status = az_side.analyze(lanes, {"center": "dashed"}, tracks=[oncoming],
+                                 depth_map=near_depth, ego_speed_mps=20.0,
+                                 scene_brightness=150.0, lighting_state="DAY")
+        check(f"overtaking [{side_name}]: close fast oncoming vehicle across "
+              f"the divider -> NOT_POSSIBLE_ONCOMING",
+              status == OvertakeStatus.NOT_POSSIBLE_ONCOMING, f"got {status}")
+
+        same_lane = FakeDet((ego_x, 300, ego_x + 60, 360), 0.9, 0, "car")
+        same_lane.track_id = 98
+        same_lane.depth_speed_mps = 25.0
+        status = az_side.analyze(lanes, {"center": "dashed"}, tracks=[same_lane],
+                                 depth_map=near_depth, ego_speed_mps=20.0,
+                                 scene_brightness=150.0, lighting_state="DAY")
+        check(f"overtaking [{side_name}]: a vehicle on the EGO's side of the "
+              f"divider is not treated as oncoming",
+              status != OvertakeStatus.NOT_POSSIBLE_ONCOMING, f"got {status}")
+
+    check("overtaking: India default overtakes on the right",
+          OvertakingAnalyzer(ipm=ipm).manoeuvre_side == "right")
+    check("overtaking: an invalid traffic_side is rejected outright rather "
+          "than silently defaulting to one convention",
+          _raises(lambda: OvertakingAnalyzer(ipm=ipm, traffic_side="LHD")))
 
 
 # --------------------------------------------------------------------------
@@ -257,6 +295,196 @@ def test_overtaking():
 #    something where nothing real is there" (billboards/hoardings/
 #    reflections a domain-shifted detector can hallucinate onto).
 # --------------------------------------------------------------------------
+
+def test_rear_view():
+    """Rear-and-side assessment for the overtaking decision.
+
+    Two things are being protected here. The first is the IRC:66 arithmetic --
+    the spacing formula takes m/s, and feeding it km/h silently doubles every
+    distance. The second, and the more important one, is that the module
+    refuses to certify a lane clear when it cannot see far enough back to know:
+    "I see nothing" is not "nothing is there".
+    """
+    from inference.overtaking import OvertakingAnalyzer, OvertakeStatus
+    from inference.rear_view import (RearApproachMonitor, manoeuvre_time_s,
+                                     overtaken_speed_default_mps,
+                                     overtaking_sight_distance_m, spacing_m)
+    from models.ipm import IPMTransformer
+
+    # -- IRC:66 arithmetic ---------------------------------------------------
+    # Published OSD values for two-lane highways. The implementation should
+    # track them; large divergence means a units error, which is the failure
+    # mode this exists to catch.
+    published = {40: 165, 50: 235, 60: 300, 65: 340, 80: 470, 100: 640}
+    devs = {}
+    for kmph, want in published.items():
+        got = overtaking_sight_distance_m(kmph / 3.6)
+        devs[kmph] = (got - want) / want
+    check("rear/IRC: overtaking sight distance tracks the published IRC:66 "
+          "table across 40-100 km/h (a units error would show as ~2x)",
+          all(abs(d) < 0.25 for d in devs.values()),
+          str({k: f"{v*100:.0f}%" for k, v in devs.items()}))
+    check("rear/IRC: spacing formula takes m/s, not km/h "
+          "(s = 0.7*Vb + 6 at 10 m/s is 13 m, not 132 m)",
+          abs(spacing_m(10.0) - 13.0) < 1e-6, str(spacing_m(10.0)))
+    check("rear/IRC: the overtaken vehicle defaults to 16 km/h below ego, not "
+          "to the ego's own speed (passing something equally fast is not a "
+          "manoeuvre and inflates the window)",
+          abs(overtaken_speed_default_mps(20.0) - (20.0 - 16 / 3.6)) < 1e-6,
+          str(overtaken_speed_default_mps(20.0)))
+    check("rear/IRC: sight distance grows with speed",
+          all(overtaking_sight_distance_m(v / 3.6)
+              < overtaking_sight_distance_m((v + 10) / 3.6)
+              for v in range(30, 100, 10)))
+    check("rear/IRC: manoeuvre time grows with the speed of the vehicle passed",
+          manoeuvre_time_s(8.0) < manoeuvre_time_s(20.0))
+    check("rear/IRC: a stationary ego still yields a positive manoeuvre time "
+          "(no divide-by-zero at rest)",
+          manoeuvre_time_s(0.0) > 0)
+
+    # -- which side is the manoeuvre side ------------------------------------
+    check("rear: left-hand traffic (India) overtakes on the RIGHT",
+          RearApproachMonitor(traffic_side="left").manoeuvre_side == "right")
+    check("rear: right-hand traffic (US/EU) overtakes on the LEFT",
+          RearApproachMonitor(traffic_side="right").manoeuvre_side == "left")
+
+    india = RearApproachMonitor(traffic_side="left")
+    right_side = FakeDet((900, 300, 1000, 400), 0.9, 0, "car")
+    left_side = FakeDet((100, 300, 200, 400), 0.9, 0, "car")
+    check("rear: a vehicle on the right is on India's manoeuvre side",
+          india.on_manoeuvre_side(right_side, frame_width=1280))
+    check("rear: a vehicle on the left is NOT on India's manoeuvre side",
+          not india.on_manoeuvre_side(left_side, frame_width=1280))
+
+    # -- observability: the check most rule-based systems omit ---------------
+    far = np.full((480, 1280), 80.0, dtype=np.float32)
+    near = np.full((480, 1280), 12.0, dtype=np.float32)
+
+    v = india.analyze(None, far, ego_speed_mps=20.0)
+    check("rear: with no rear view configured the verdict is NOT observable "
+          "(silence is not evidence of a clear lane)",
+          not v.observable and not v.clear, v.reason)
+
+    v = india.analyze([], near, ego_speed_mps=20.0)
+    check("rear: a rear view too short for the manoeuvre is NOT observable, "
+          "even with zero vehicles detected in it",
+          not v.observable and v.required_sight_m > v.observed_sight_m,
+          f"observed={v.observed_sight_m:.0f} required={v.required_sight_m:.0f}")
+
+    v = india.analyze([], far, ego_speed_mps=20.0)
+    check("rear: an empty lane within a sufficient rear view IS clear",
+          v.observable and v.clear, v.reason)
+    check("rear: the verdict carries the numbers behind it, so a refusal can "
+          "be explained rather than just asserted",
+          v.required_clear_time_s > 0 and v.observed_sight_m > 0
+          and "clear" in v.describe(), v.describe())
+
+    # -- a vehicle closing from behind ---------------------------------------
+    def rear_car(x, closing_mps, tid):
+        d = FakeDet((x, 300, x + 100, 400), 0.9, 0, "car")
+        d.track_id = tid
+        # Project convention (inference/collision.py): POSITIVE means the gap
+        # is shrinking. A negative value here would read as pulling away.
+        d.depth_speed_mps = closing_mps
+        return d
+
+    closer = rear_car(900, 15.0, 1)          # right side, closing fast
+    v = india.analyze([closer], far, ego_speed_mps=20.0)
+    check("rear: a vehicle closing fast on the manoeuvre side blocks the "
+          "overtake",
+          v.observable and not v.clear and v.blocking_track_id == 1,
+          v.describe())
+    check("rear: the block reports gap and time-to-arrival",
+          v.blocking_gap_m is not None and v.blocking_tta_s is not None,
+          v.describe())
+
+    other_side = rear_car(100, 15.0, 2)      # left side: not where we are going
+    v = india.analyze([other_side], far, ego_speed_mps=20.0)
+    check("rear: a vehicle closing on the OPPOSITE side does not block "
+          "(this is the whole point of checking the manoeuvre side)",
+          v.clear, v.describe())
+
+    keeping_pace = rear_car(900, 0.5, 3)     # right side, barely gaining
+    v = india.analyze([keeping_pace], far, ego_speed_mps=20.0)
+    check("rear: a vehicle behind that is merely keeping pace does not block",
+          v.clear, v.describe())
+
+    pulling_away = rear_car(900, -12.0, 4)   # right side, falling back
+    v = india.analyze([pulling_away], far, ego_speed_mps=20.0)
+    check("rear: a vehicle behind that is falling back does not block "
+          "(sign convention: negative depth_speed_mps means the gap grows)",
+          v.clear, v.describe())
+
+    # Under the mirrored convention the same geometry must give the mirrored
+    # answer -- otherwise one of the two is hardcoded.
+    us = RearApproachMonitor(traffic_side="right")
+    check("rear [US/EU]: the SAME closing vehicle on the right does NOT block, "
+          "because the manoeuvre side is the left",
+          us.analyze([rear_car(900, 15.0, 5)], far, ego_speed_mps=20.0).clear)
+    check("rear [US/EU]: a closing vehicle on the left DOES block",
+          not us.analyze([rear_car(100, 15.0, 6)], far, ego_speed_mps=20.0).clear)
+
+    # -- integration with the overtaking decision ----------------------------
+    src = np.array([[300, 480], [340, 480], [280, 300], [360, 300]], dtype=np.float32)
+    dst = np.array([[-1.75, 5], [1.75, 5], [-1.75, 30], [1.75, 30]], dtype=np.float32)
+    ipm = IPMTransformer.from_points(src, dst)
+
+    class FakeLanes:
+        def __init__(self, polylines):
+            self.polylines = polylines
+
+    straight = np.array([[320, 480 - i * 15] for i in range(12)], dtype=np.float32)
+    lanes = FakeLanes([straight, straight + 60])
+    depth = np.full((480, 1280), 80.0, dtype=np.float32)
+    kw = dict(lanes=lanes, lane_types={"center": "dashed"}, tracks=[],
+              depth_map=depth, ego_speed_mps=20.0, scene_brightness=150.0,
+              lighting_state="DAY")
+
+    az_single = OvertakingAnalyzer(ipm=ipm)
+    check("overtaking: a single forward camera behaves exactly as before "
+          "(the rear rule does not silently block every frame)",
+          az_single.analyze(**kw) == OvertakeStatus.POSSIBLE,
+          str(az_single.analyze(**kw)))
+    check("overtaking: and it records that the rear was never assessed, rather "
+          "than implying it was checked and found clear",
+          az_single.last_rear_verdict is None)
+
+    az_rear = OvertakingAnalyzer(ipm=ipm, require_rear_view=True)
+    check("overtaking: with the rear check REQUIRED and no rear input, the "
+          "verdict fails safe to NOT_POSSIBLE_REAR_UNSEEN",
+          az_rear.analyze(**kw) == OvertakeStatus.NOT_POSSIBLE_REAR_UNSEEN,
+          str(az_rear.analyze(**kw)))
+
+    status = az_rear.analyze(rear_tracks=[], rear_depth_map=depth, **kw)
+    check("overtaking: with a rear view that reaches far enough and nothing "
+          "in it -> POSSIBLE", status == OvertakeStatus.POSSIBLE, str(status))
+
+    status = az_rear.analyze(rear_tracks=[rear_car(900, 15.0, 7)],
+                             rear_depth_map=depth, **kw)
+    check("overtaking: a vehicle closing from behind on the side being turned "
+          "into -> NOT_POSSIBLE_REAR_APPROACH",
+          status == OvertakeStatus.NOT_POSSIBLE_REAR_APPROACH, str(status))
+    check("overtaking: the rear verdict is retained for display/logging",
+          az_rear.last_rear_verdict is not None
+          and az_rear.last_rear_verdict.blocking_track_id == 7)
+
+    status = az_rear.analyze(rear_tracks=[], rear_depth_map=near, **kw)
+    check("overtaking: an empty but too-short rear view is refused, not "
+          "treated as clear — the sensor range must cover the decision",
+          status == OvertakeStatus.NOT_POSSIBLE_REAR_UNSEEN, str(status))
+
+    # -- lead-vehicle speed sign ---------------------------------------------
+    lead = FakeDet((300, 300, 400, 400), 0.9, 0, "truck")
+    lead.track_id = 8
+    lead.depth_speed_mps = 5.0     # we are closing on it at 5 m/s
+    check("overtaking: a lead vehicle we are gaining on is computed as SLOWER "
+          "than the ego, not faster (sign error here shortens the window)",
+          abs(OvertakingAnalyzer._lead_speed_mps(lead, 20.0) - 15.0) < 1e-6,
+          str(OvertakingAnalyzer._lead_speed_mps(lead, 20.0)))
+    check("overtaking: with no lead vehicle the speed is unknown, letting the "
+          "IRC default apply rather than inventing a number",
+          OvertakingAnalyzer._lead_speed_mps(None, 20.0) is None)
+
 
 def test_sanity_filter():
     from inference.sanity_filter import SizeConsistencyFilter
@@ -887,6 +1115,8 @@ def main():
         ("IPM ground-plane curvature", test_ipm),
         ("Drivable-area fallback (unmarked-road lane substitute)", test_drivable_area),
         ("Overtaking decision rules", test_overtaking),
+        ("Rear-view overtaking (IRC:66 window + sensor-range honesty)",
+         test_rear_view),
         ("Sanity filter (phantom-detection geometric check)", test_sanity_filter),
         ("Entry points run as real scripts (import-path regression)",
          test_entry_points_run_as_scripts),
