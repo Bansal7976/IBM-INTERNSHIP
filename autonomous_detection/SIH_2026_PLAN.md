@@ -180,8 +180,25 @@ Plan, in increasing effort:
    relying on the zero-reference method.
 
 Our pipeline already classifies DAY / NIGHT_LIT / NIGHT_UNLIT, which maps onto
-"under lights" versus "dark" in your requirement — IDD-AW lets us *validate*
+"under lights" versus "dark" in the requirement — IDD-AW lets us *validate*
 that split instead of assuming it.
+
+**A per-condition evaluation that needs no new data is already implemented**
+(`evaluation/evaluate_conditions.py`, `training/pbs/india_night_eval.pbs`). It
+buckets the validation set with the pipeline's *own* `scene_lighting()`, so the
+table validates the classifier that ships and gates the overtaking rule, not a
+separate offline one. Per bucket it reports SWMC and the critical-error rate,
+because night failures are overwhelmingly misses and mAP averages a missed
+pedestrian together with a missed parked cart.
+
+It also runs the **enhancement ablation** — raw versus Zero-DCE++/CLAHE, over
+the same images. This is worth doing rather than assuming: enhancement can
+amplify sensor noise into texture that a domain-shifted detector reads as an
+object, which is one of the routes to the phantom detections observed on Indian
+footage. The comparison is controlled and the answer is allowed to come out
+negative. Buckets smaller than `--min-bucket` are flagged rather than reported
+as a confident number; unlit-night frames are rare, and a metric computed over
+30 images is noise dressed as a result.
 
 ### 4.2 Lane detection on unstructured roads — IDD lane subset
 
@@ -197,11 +214,36 @@ for exactly this evaluation. Two paths, and we should do both:
 
 ### 4.3 Mountain roads and curvature
 
-Already implemented: ground-plane projection giving curve radius in metres,
-compared against road-design minimum radii. What is missing is **validation on
-real curved Indian roads**. IDD sequences include hill and outskirt driving;
-selecting a curved subset and reporting radius estimates against the road's
-known geometry would substantiate the claim.
+Ground-plane projection gives the curve radius in metres, compared against
+road-design minimum radii. Validating it turned up a defect worth reporting.
+
+**The estimate used to read every road straighter than it is.** Projecting arcs
+of *known* radius through the homography and recovering them showed a
+consistent bias: a 50 m switchback came back as 135 m, a 100 m curve as 123 m,
+a 150 m curve as 164 m. The cause was evaluating curvature at the far end of
+the lane polyline, where κ = |2a|/(1+(2az+b)²)^1.5 divides by the largest slope
+term. The error was always in the unsafe direction — a road reported straighter
+than it is permits an overtake the geometry does not support.
+
+It now reports the **tightest curvature over the visible stretch**, which is
+also the quantity the decision needs, since that is what limits sight distance.
+Against the same arcs it is within 4% at and above the 150 m decision
+threshold, and errs toward reporting a *sharper* curve for tighter ones (50 m
+arc → 27 m) — wrong in the direction that refuses rather than permits.
+
+| true radius | before | now |
+|---|---|---|
+| 50 m | 135 m (**+171%**) | 27 m (−46%) |
+| 100 m | 123 m (+23%) | 90 m (−10%) |
+| 150 m | 164 m (+9%) | 143 m (−4%) |
+| 400 m | 405 m (+1%) | 398 m (−1%) |
+
+Validation is synthetic by construction, and that is the point: it tests the
+*estimator* against a known answer, which no amount of real footage without
+surveyed radii can do. Real curved IDD sequences remain useful as a
+qualitative check that the lane input feeding it is sane.
+
+Implementation: `models/ipm.py`; 8 checks in the verification suite.
 
 ### 4.4 Overtaking with rear-view — IDD-X
 
@@ -223,10 +265,41 @@ This upgrades the overtaking module from five hand-written rules to:
 | all objects weighted equally | ego-relative **importance**, as annotated |
 | verdict with a reason string | verdict with an **explanation category**, comparable to the dataset's own labels |
 
-The rear-view rule to add: before permitting an overtake, check the rear and
-side region on the manoeuvre side for an approaching vehicle, using the same
-depth-differenced closing speed already implemented for the forward direction.
-Fail safe if that region is not observable.
+**The rear-view rule is implemented** (`inference/rear_view.py`, RULE 6 in
+`inference/overtaking.py`, 27 checks). Two design choices depart from how this
+is usually done, and both are defensible in the paper:
+
+**The manoeuvre window is derived, not guessed.** A hard-coded "8 seconds" has
+no defence. The window now comes from **IRC:66 overtaking sight distance**,
+computed from the ego speed, the *measured* speed of the vehicle being passed,
+and the standard's speed-dependent acceleration table. Values track the
+published OSD figures within −16%/+18% across 40–100 km/h, closest at highway
+speeds. Overtaking an autorickshaw at 40 km/h and passing a truck at 80 are no
+longer the same manoeuvre.
+
+**Sensor range is checked against the decision.** A system that sees 30 m back
+cannot honestly certify a lane clear when a vehicle 70 m back would arrive
+inside the window. When observable range falls short, the verdict is
+`NOT_POSSIBLE_REAR_UNSEEN` — *"I see nothing" is not "nothing is there"*. This
+is the honest reading of the requirement to look as far back as the frame
+allows, and most rule-based pipelines simply omit the check.
+
+The rule is **off by default**, so a single-camera deployment behaves exactly
+as before and never implies a rear check it did not perform.
+
+### 4.5 A bug this uncovered: India drives on the LEFT
+
+The overtaking module hardcoded the **US/Europe convention** — that the
+oncoming lane is to the *left* of the divider. India drives on the left and
+overtakes on the **right**, so the module was treating vehicles in the ego's
+own lane as oncoming and ignoring genuine head-on traffic, and picking the
+wrong lane boundary as the line to cross.
+
+This is worth a sentence in the paper. Nearly every published pipeline is built
+on KITTI/BDD100K/Cityscapes and inherits the right-hand-traffic assumption
+silently, so any of them ported to India carries the same inversion. It is now
+an explicit `traffic_side` parameter defaulting to India, with both conventions
+covered by tests.
 
 ---
 
@@ -235,20 +308,41 @@ Fail safe if that region is not observable.
 Sequenced so each step produces a result usable in the paper even if the next
 step does not finish.
 
-| # | Step | Output | Effort |
+| # | Step | Output | Status |
 |---|---|---|---|
-| 1 | Register and download IDD, IDD-AW, IDD-X | data | 1 day (approval) |
-| 2 | Build the decision-grouped taxonomy mapper | code | **done, this commit** |
-| 3 | Baseline: current detector on IDD test split | **the domain-gap number** | 1 h GPU |
-| 4 | Train at 3 granularities (fine / IDD-L3 / decision-6) | **the taxonomy result** | 3 × 6 h GPU |
-| 5 | Evaluate all three with mAP **and** SWMC | **the safety result** | 1 h |
-| 6 | Baseline and train on IDD-AW low-light | **the night result** | 4 h |
-| 7 | Fine-tune CLRNet on IDD lane subset | **the lane result** | 8 h |
-| 8 | Add rear-view rule, evaluate against IDD-X | **the overtaking result** | 1 day |
-| 9 | Curved-subset curvature validation | mountain-road result | 4 h |
+| 1 | Register and download IDD, IDD-AW, IDD-X | data | pending approval |
+| 2 | Decision-grouped taxonomy + SWMC metric | code | **done** |
+| 3 | Dataset remapper, all three granularities | code | **done** |
+| 4 | Rear-view overtaking rule (IRC:66 window) | code | **done** |
+| 5 | Metric curvature, validated against known arcs | code | **done** |
+| 6 | Taxonomy drives collision margins | code | **done** |
+| 7 | Train at 3 granularities | **the taxonomy result** | 3 × ~8 h GPU |
+| 8 | Compare all three under SWMC | **the safety result** | 1 h GPU |
+| 9 | Per-condition (night) evaluation + enhancement ablation | **the night result** | 2 h GPU |
+| 10 | Fine-tune CLRNet on IDD lane subset | **the lane result** | 8 h GPU, needs step 1 |
+| 11 | Evaluate the rear-view rule against IDD-X | **the overtaking result** | 1 day, needs step 1 |
 
-**Steps 3 to 5 alone constitute a complete paper.** Everything after
-strengthens it.
+**Steps 7 to 9 alone constitute a complete paper**, and every input they need
+already exists. Steps 10 and 11 strengthen it but are blocked on dataset
+access, so nothing on the critical path waits for an approval email.
+
+### Submission order
+
+```bash
+qsub training/pbs/granularity_step1_prepare.pbs          # CPU, ~1 h
+# then the three trainings — independent, may queue in parallel
+qsub -v LEVEL=fine     training/pbs/granularity_step2_train.pbs
+qsub -v LEVEL=semantic training/pbs/granularity_step2_train.pbs
+qsub -v LEVEL=decision training/pbs/granularity_step2_train.pbs
+# once all three finish
+qsub training/pbs/granularity_step3_compare.pbs          # the paper's main table
+qsub -v LEVEL=decision training/pbs/india_night_eval.pbs # the night table
+```
+
+Run `python scripts/verify_adas_pipeline.py` before submitting anything. It is
+GPU-free, takes about a minute, and has now caught six defects that would
+otherwise have surfaced only after hours of cluster time — including two that
+were already running.
 
 ---
 
@@ -259,17 +353,42 @@ first:
 
 1. **A taxonomy derived from decision consequence rather than visual
    similarity**, with the accuracy and safety trade-off measured across three
-   granularities rather than asserted.
+   granularities rather than asserted — and with the grouping actually driving
+   behaviour (collision margins scale by group), not merely relabelling boxes.
 2. **A safety-weighted misclassification cost for detection**, extending to
    detection the principle IDD-AW established for segmentation, with an
-   explicitly asymmetric cost for errors toward less caution.
-3. **An integrated decision layer consuming that taxonomy** — forward and rear
-   view, metric curvature, a degradation contract — evaluated end to end on
-   Indian data rather than per-task in isolation.
+   explicitly asymmetric cost for errors toward less caution and a scale
+   anchored at the genuinely worst event — a vulnerable road user undetected.
+3. **A decision layer that respects its own competence boundary.** This is the
+   thread running through the whole system, and it is what most distinguishes
+   it from "we trained a detector on Indian data":
+   - the overtaking rule refuses when the rear view does not reach as far as
+     the manoeuvre requires, instead of reading silence as safety;
+   - the curvature estimate errs toward reporting a sharper curve, so its
+     failures refuse rather than permit;
+   - the geometric sanity filter rejects detections that are the wrong
+     physical size for their distance;
+   - optional modules degrade explicitly rather than silently.
+
+   In each case the system distinguishes *"I checked and it is clear"* from
+   *"I could not check"*, and reports which.
 
 What we should **not** claim: that we beat published detectors. We will not, and
-it is not the point. The point is that the granularity and the cost function are
-chosen for the decision the system has to make.
+it is not the point. The point is that the granularity, the cost function and
+the refusal conditions are all chosen for the decision the system has to make.
+
+### Honest notes for the write-up
+
+- The three-granularity comparison must state that native mAP is **not**
+  comparable across rows. Claiming otherwise is the error the design exists to
+  avoid, and a reviewer will find it immediately.
+- The IRC:66 figures deviate from the published table by −16% to +18%. Say so.
+- Curvature validation is **synthetic**. That is a strength — it tests the
+  estimator against a known answer — but it must not be presented as validation
+  on real curved roads, which would require surveyed radii we do not have.
+- If the low-light enhancement ablation comes out neutral or negative, report
+  it as the finding. It is a more interesting result than a small improvement,
+  and the pipeline currently applies enhancement on every dark frame.
 
 ---
 
@@ -291,3 +410,11 @@ Verified against publisher listings, not preprint servers.
   dataset for diverse Indian traffic scenes," **IEEE ITSC 2025**.
 - AIM, Indian Institute of Science, "The Urban Vision Hackathon dataset and
   models," Tech. Rep. UVH-26-v1.0, Nov 2025.
+- Indian Roads Congress, **IRC:66-1976**, "Recommended practice for sight
+  distance on rural highways," New Delhi. *Source of the overtaking sight
+  distance and manoeuvre-time formulation used by the rear-view rule. Verify
+  the edition and clause numbers against a copy of the standard before the
+  paper goes out — this citation has been taken from secondary sources.*
+- R. Hartley and A. Zisserman, *Multiple View Geometry in Computer Vision*,
+  2nd ed., Cambridge University Press, 2004, ch. 13. *Plane-induced homography
+  used for the ground-plane projection.*
