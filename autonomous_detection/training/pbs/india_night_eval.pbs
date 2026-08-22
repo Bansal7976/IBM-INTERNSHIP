@@ -1,0 +1,104 @@
+#!/bin/bash
+# NIGHT AND LOW LIGHT — per-condition safety evaluation
+#
+# Answers, with numbers rather than assertion, the two things the plan had so
+# far only assumed:
+#
+#   1. Is the pipeline's DAY / NIGHT_LIT / NIGHT_UNLIT split real? It gates the
+#      overtaking rule and switches on enhancement, so if the buckets are not
+#      meaningful the gate is arbitrary. The evaluation buckets frames with the
+#      pipeline's OWN classifier, so the table validates what ships.
+#
+#   2. Does low-light enhancement actually help DETECTION? It runs on every
+#      dark frame today. Enhancement can equally amplify noise into texture a
+#      domain-shifted detector reads as an object -- one of the routes to the
+#      phantom detections seen on Indian footage. Both arms run over the same
+#      images, and the answer is allowed to come out negative.
+#
+# Reports SWMC rather than mAP alone: night failures are overwhelmingly misses,
+# and a missed pedestrian is not the same event as a missed parked cart.
+#
+# Submit:  qsub -v LEVEL=decision training/pbs/india_night_eval.pbs
+#PBS -N India_Night
+#PBS -l select=1:ncpus=8:ngpus=1:mem=40gb
+#PBS -q gpu
+#PBS -l walltime=08:00:00
+#PBS -o /home/krish.123449/logs/india_night.log
+#PBS -j oe
+#
+# NOTE: `#PBS -V` is deliberately ABSENT — it exports the submitting shell's
+# CONDA_PREFIX/CONDA_SHLVL, after which `conda activate` silently does nothing.
+
+# NOTE: `-u` is deliberately absent; `conda activate` reads unset variables in a
+# non-interactive shell and would abort under it.
+set -o pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+
+LEVEL="${LEVEL:-decision}"
+case "$LEVEL" in
+    fine|semantic|decision) ;;
+    *) echo "ERROR: LEVEL must be fine, semantic or decision (got '$LEVEL')"; exit 1 ;;
+esac
+
+source /home/soft/anaconda3/etc/profile.d/conda.sh
+conda activate auto_det
+
+case "$(command -v python)" in
+    *auto_det*) ;;
+    *)
+        ENV_BIN="$(conda info --base 2>/dev/null)/envs/auto_det/bin"
+        if [ -x "$ENV_BIN/python" ]; then
+            echo "conda activate did not take effect; using $ENV_BIN directly"
+            export PATH="$ENV_BIN:$PATH"
+        fi
+        ;;
+esac
+
+export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+echo "python : $(command -v python)"
+case "$(command -v python)" in
+    *auto_det*) echo "conda environment: OK" ;;
+    *) echo "ERROR: python resolved to $(command -v python), not auto_det"; exit 1 ;;
+esac
+
+WEIGHTS="runs/granularity/$LEVEL/weights/best.pt"
+DATA="data/gran_$LEVEL/$LEVEL.yaml"
+for required in "$WEIGHTS" "$DATA"; do
+    if [ ! -e "$required" ]; then
+        echo "ERROR: missing $required"
+        echo "Run granularity_step1_prepare.pbs and granularity_step2_train.pbs first."
+        exit 1
+    fi
+done
+
+echo "============================================"
+echo "  PER-CONDITION SAFETY EVALUATION [$LEVEL]"
+echo "  GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
+echo "  $(date)"
+echo "============================================"
+
+mkdir -p results
+
+python evaluation/evaluate_conditions.py \
+    --weights "$WEIGHTS" \
+    --data "$DATA" \
+    --imgsz 640 \
+    --conf 0.25 \
+    --iou 0.5 \
+    --min-bucket 100 \
+    --out "results/conditions_$LEVEL.json" || exit 1
+
+echo ""
+echo "============================================"
+echo "  DONE  $(date)"
+echo "  results/conditions_$LEVEL.json"
+echo ""
+echo "  Read the table honestly. If a bucket is flagged as too small, report"
+echo "  the image count and not the metric — a confident number over 30 frames"
+echo "  is noise dressed as a result. If enhancement comes out neutral or"
+echo "  negative, that is the finding and it belongs in the paper as one."
+echo "============================================"

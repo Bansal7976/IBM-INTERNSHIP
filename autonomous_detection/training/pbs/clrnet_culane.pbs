@@ -6,9 +6,16 @@
 #PBS -l walltime=36:00:00
 #PBS -j oe
 #PBS -o logs/clrnet_culane.log
-#PBS -V
+#
+# NOTE: `#PBS -V` is deliberately ABSENT. It exports the submitting shell's
+# CONDA_PREFIX/CONDA_SHLVL, after which `conda activate` believes the shell is
+# already activated and silently does nothing, leaving /bin/python on PATH.
+# Three jobs failed this way before the cause was found.
 
-set -euo pipefail
+# NOTE: `-u` is deliberately absent. `conda activate` reads variables (PS1
+# among them) that are unset in a non-interactive batch shell, and under `set -u`
+# the activation aborts silently -- leaving the wrong interpreter on PATH.
+set -eo pipefail
 cd "$PBS_O_WORKDIR"
 mkdir -p logs
 
