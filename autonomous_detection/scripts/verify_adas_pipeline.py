@@ -533,9 +533,298 @@ def test_heuristic_lane_type():
 
 
 # --------------------------------------------------------------------------
+# 11. Decision-grouped taxonomy and the safety-weighted misclassification cost.
+#
+#     Classes are grouped by what the decision layer must do differently, not
+#     by visual similarity. The cost of a misclassification is deliberately
+#     ASYMMETRIC: predicting something that demands less caution than the truth
+#     is a hazard, while predicting something more cautious is only a nuisance.
+# --------------------------------------------------------------------------
+
+def test_taxonomy():
+    from models.taxonomy import (DecisionTaxonomy, DECISION_CLASSES,
+                                 misclassification_cost, miss_cost,
+                                 cost_matrix,
+                                 GROUP_BEHAVIOUR)
+
+    tx = DecisionTaxonomy()
+
+    # Name normalisation: separators and case must not matter, or a dataset
+    # writing "Auto-Rickshaw" silently loses every one of those labels.
+    for variant in ("autorickshaw", "Auto-Rickshaw", "AUTO RICKSHAW",
+                    "auto_rickshaw", "three wheeler"):
+        got = tx.map_name(variant)
+        check(f"taxonomy: {variant!r} maps to THREE_WHEELER",
+              got == "THREE_WHEELER", f"got {got!r}")
+
+    # The confusion mode actually observed on the cluster (truck/bus/tanker/
+    # tractor/LCV competing) must collapse into one class.
+    heavy = ["truck", "bus", "tanker", "tractor", "LCV", "mini bus",
+             "construction vehicle", "trailer"]
+    mapped = {tx.map_name(n) for n in heavy}
+    check("taxonomy: all heavy-vehicle variants collapse to one class "
+          "(removes the observed truck/bus/tanker confusion by construction)",
+          mapped == {"HEAVY_VEHICLE"}, f"got {mapped}")
+
+    check("taxonomy: animals are VULNERABLE, not obstacles",
+          tx.map_name("cow") == "VULNERABLE", tx.map_name("cow"))
+    check("taxonomy: a cart is a STATIC_OBSTACLE, not a vehicle",
+          tx.map_name("pushcart") == "STATIC_OBSTACLE", tx.map_name("pushcart"))
+
+    # Unknown names must return None, never a guess -- silently bucketing an
+    # unrecognised class would corrupt the labels with no way to notice.
+    check("taxonomy: unknown class returns None rather than guessing",
+          tx.map_name("flying saucer") is None)
+    check("taxonomy: unknown names are recorded for reporting",
+          "flying saucer" in tx.unmapped)
+
+    # --- the asymmetry, which is the whole point of the metric ---
+    danger = misclassification_cost("VULNERABLE", "STATIC_OBSTACLE")
+    nuisance = misclassification_cost("STATIC_OBSTACLE", "VULNERABLE")
+    check("SWMC: calling a person a barrier is near the top of the scale",
+          0.8 <= danger < 1.0, f"got {danger}")
+    check("SWMC: the maximum cost (1.0) is a vulnerable road user going "
+          "entirely UNDETECTED -- strictly worse than any mislabelling of one",
+          abs(miss_cost("VULNERABLE") - 1.0) < 1e-6
+          and miss_cost("VULNERABLE") > danger,
+          f"miss={miss_cost('VULNERABLE')} vs mislabel={danger}")
+    check("SWMC: calling a barrier a person is cheap (over-caution)",
+          nuisance <= 0.15, f"got {nuisance}")
+    check("SWMC: the cost is ASYMMETRIC (this is what a plain confusion "
+          "matrix cannot express)",
+          danger > nuisance * 5, f"{danger} vs {nuisance}")
+
+    check("SWMC: same-group confusion is free (bus vs truck)",
+          misclassification_cost("HEAVY_VEHICLE", "HEAVY_VEHICLE") == 0.0)
+
+    # Falling further down the caution ordering must cost more.
+    near = misclassification_cost("VULNERABLE", "TWO_WHEELER")
+    far = misclassification_cost("VULNERABLE", "STATIC_OBSTACLE")
+    check("SWMC: cost grows with how far the prediction falls in caution",
+          far > near, f"far={far} near={near}")
+
+    m = cost_matrix()
+    check("SWMC: matrix is square over the decision classes",
+          len(m) == len(DECISION_CLASSES) and len(m[0]) == len(DECISION_CLASSES))
+    check("SWMC: diagonal is zero", all(m[i][i] == 0.0 for i in range(len(m))))
+
+    # Behaviour parameters must exist for every class, or a downstream module
+    # will KeyError at inference time on whichever class was forgotten.
+    missing = [c for c in DECISION_CLASSES if c not in GROUP_BEHAVIOUR]
+    check("taxonomy: every class has decision parameters", not missing, str(missing))
+    check("taxonomy: vulnerable road users get the largest TTC margin",
+          GROUP_BEHAVIOUR["VULNERABLE"]["ttc_margin_scale"] ==
+          max(b["ttc_margin_scale"] for b in GROUP_BEHAVIOUR.values()))
+    check("taxonomy: only heavy vehicles are flagged as view-blocking",
+          [c for c in DECISION_CLASSES if GROUP_BEHAVIOUR[c]["blocks_view"]]
+          == ["HEAVY_VEHICLE"])
+    check("taxonomy: only static obstacles are marked as unable to move",
+          [c for c in DECISION_CLASSES if not GROUP_BEHAVIOUR[c]["can_move"]]
+          == ["STATIC_OBSTACLE"])
+
+    # id remap from a source dataset's own name list
+    src = {0: "car", 1: "truck", 2: "autorickshaw", 3: "person", 4: "unknown thing"}
+    remap = tx.map_id_from_names(src)
+    check("taxonomy: id remap covers known classes and drops unknown ones",
+          set(remap) == {0, 1, 2, 3}, f"got {remap}")
+    check("taxonomy: remapped ids point at the right groups",
+          remap[2] == DECISION_CLASSES.index("THREE_WHEELER")
+          and remap[3] == DECISION_CLASSES.index("VULNERABLE"), str(remap))
+
+
+# --------------------------------------------------------------------------
 # 10. CLRNet coordinate-scaling regression test (no GPU/weights needed —
 #     exercises the exact arithmetic that was buggy)
 # --------------------------------------------------------------------------
+
+def test_swmc_and_granularity():
+    """SWMC scoring, and the experiment-validity guarantees around it.
+
+    The checks that matter most here are not the arithmetic ones -- they are
+    the two that protect the granularity experiment from producing a number
+    that looks like a result but is an artefact:
+      * the two groupings must cover the same source vocabulary, and
+      * the three prepared datasets must contain identical boxes.
+    Without those, a taxonomy that merely *drops more hard objects* would post
+    the best score.
+    """
+    import subprocess
+    import tempfile
+
+    from models.taxonomy import (CAUTION_RANK, DECISION_CLASSES,
+                                 IDD_LEVEL3_GROUPS, NAME_TO_GROUP,
+                                 false_positive_cost, misclassification_cost,
+                                 miss_cost)
+    from evaluation.evaluate_swmc import (UNMAPPED, SWMCAccumulator,
+                                          label_path_for,
+                                          match_class_agnostic,
+                                          split_weights_data)
+
+    I = {c: i for i, c in enumerate(DECISION_CLASSES)}
+    BOX = [10.0, 10.0, 60.0, 120.0]
+    BOX2 = [200.0, 10.0, 250.0, 120.0]
+
+    # -- vocabulary parity: the guard that keeps the comparison honest -------
+    check("swmc: decision and semantic groupings cover the same vocabulary "
+          "(else the three datasets differ in content, not just labels)",
+          set(NAME_TO_GROUP) == set(IDD_LEVEL3_GROUPS),
+          f"decision-only={sorted(set(NAME_TO_GROUP) - set(IDD_LEVEL3_GROUPS))[:5]} "
+          f"semantic-only={sorted(set(IDD_LEVEL3_GROUPS) - set(NAME_TO_GROUP))[:5]}")
+
+    # -- miss / phantom costs -----------------------------------------------
+    check("swmc: missing a pedestrian costs more than missing a static obstacle",
+          miss_cost("VULNERABLE") > miss_cost("STATIC_OBSTACLE"),
+          f"{miss_cost('VULNERABLE')} vs {miss_cost('STATIC_OBSTACLE')}")
+    check("swmc: a miss is never cheaper than any misclassification of the "
+          "same object (the object is absent from the world model entirely)",
+          all(miss_cost(t) >= misclassification_cost(t, p) - 1e-9
+              for t in DECISION_CLASSES for p in DECISION_CLASSES),
+          str([(t, p, miss_cost(t), misclassification_cost(t, p))
+               for t in DECISION_CLASSES for p in DECISION_CLASSES
+               if miss_cost(t) < misclassification_cost(t, p) - 1e-9][:3]))
+    check("swmc: a phantom costs strictly less than a miss of the same group "
+          "(over-caution is a nuisance, absence is a hazard)",
+          all(false_positive_cost(g) < miss_cost(g) for g in DECISION_CLASSES))
+    check("swmc: phantom cost is non-zero (false alarms erode trust in alerts)",
+          all(false_positive_cost(g) > 0 for g in DECISION_CLASSES))
+    check("swmc: miss/phantom costs are monotone in caution rank",
+          all(miss_cost(a) > miss_cost(b)
+              for a in DECISION_CLASSES for b in DECISION_CLASSES
+              if CAUTION_RANK[a] > CAUTION_RANK[b]))
+
+    # -- accumulator accounting ---------------------------------------------
+    acc = SWMCAccumulator()
+    acc.add_frame([I["VULNERABLE"]], [BOX], [I["VULNERABLE"]], [BOX], [0.9])
+    acc.add_frame([I["VULNERABLE"]], [BOX], [I["STATIC_OBSTACLE"]], [BOX], [0.9])
+    acc.add_frame([I["HEAVY_VEHICLE"]], [BOX], [I["HEAVY_VEHICLE"]], [BOX], [0.9])
+    acc.add_frame([I["VULNERABLE"]], [BOX], [], [], [])
+    acc.add_frame([], [], [I["LIGHT_VEHICLE"]], [BOX], [0.9])
+    s = acc.summary()
+
+    check("swmc: ground-truth count ignores phantom-only frames",
+          s["n_ground_truth"] == 4, str(s["n_ground_truth"]))
+    check("swmc: correct prediction adds zero cost",
+          abs(acc.cost_cls - misclassification_cost("VULNERABLE",
+                                                    "STATIC_OBSTACLE")) < 1e-9,
+          f"cost_cls={acc.cost_cls}")
+    check("swmc: missed pedestrian charged at miss_cost",
+          abs(acc.cost_miss - miss_cost("VULNERABLE")) < 1e-9,
+          f"cost_miss={acc.cost_miss}")
+    check("swmc: phantom car charged at false_positive_cost",
+          abs(acc.cost_fp - false_positive_cost("LIGHT_VEHICLE")) < 1e-9,
+          f"cost_fp={acc.cost_fp}")
+    check("swmc: total is normalised per ground-truth object",
+          abs(s["swmc"] - round(acc.total_cost / 4, 4)) < 1e-9, str(s["swmc"]))
+    check("swmc: critical-error rate counts the miss and the less-cautious "
+          "call, but not the benign same-group one",
+          abs(s["critical_error_rate"] - 0.5) < 1e-9,
+          str(s["critical_error_rate"]))
+    check("swmc: bus-called-truck (same decision group) is NOT a critical error",
+          s["per_group"]["HEAVY_VEHICLE"]["recall"] == 1.0)
+
+    # -- the asymmetry, which is the whole point ----------------------------
+    a, b = SWMCAccumulator(), SWMCAccumulator()
+    a.add_frame([I["VULNERABLE"]], [BOX], [I["STATIC_OBSTACLE"]], [BOX], [0.9])
+    b.add_frame([I["STATIC_OBSTACLE"]], [BOX], [I["VULNERABLE"]], [BOX], [0.9])
+    check("swmc: pedestrian-called-obstacle costs far more than the reverse "
+          "(a symmetric metric cannot express this)",
+          a.summary()["swmc"] >= 5 * b.summary()["swmc"],
+          f"{a.summary()['swmc']} vs {b.summary()['swmc']}")
+
+    # -- matching semantics --------------------------------------------------
+    m, mg, mp = match_class_agnostic([BOX], [BOX], [0.9])
+    check("swmc: a correctly-located but mislabelled box is ONE match, not a "
+          "miss plus a phantom (else the cost asymmetry never fires)",
+          (len(m), len(mg), len(mp)) == (1, 0, 0), f"{len(m)},{len(mg)},{len(mp)}")
+    m, mg, mp = match_class_agnostic([BOX, BOX2], [BOX], [0.9])
+    check("swmc: two objects with one detection -> one match, one miss",
+          (len(m), len(mg), len(mp)) == (1, 1, 0), f"{len(m)},{len(mg)},{len(mp)}")
+    m, mg, mp = match_class_agnostic([BOX], [BOX, BOX2], [0.9, 0.8])
+    check("swmc: one object with two detections -> one match, one phantom",
+          (len(m), len(mg), len(mp)) == (1, 0, 1), f"{len(m)},{len(mg)},{len(mp)}")
+    m, _, _ = match_class_agnostic([BOX], [BOX2], [0.9])
+    check("swmc: a box far from any object never matches",
+          len(m) == 0)
+
+    u = SWMCAccumulator()
+    u.add_frame([UNMAPPED], [BOX], [UNMAPPED], [BOX], [0.9])
+    check("swmc: unmapped classes are skipped and counted, never scored",
+          u.summary()["n_ground_truth"] == 0
+          and u.summary()["unmapped_gt_boxes"] == 1
+          and u.summary()["unmapped_pred_boxes"] == 1)
+
+    # -- path plumbing -------------------------------------------------------
+    check("swmc: images->labels rewrite touches only the last path component "
+          "(a dataset root named *_images must survive)",
+          label_path_for(Path("d/indian_images/val/images/a.jpg"))
+          == Path("d/indian_images/val/labels/a.txt"),
+          str(label_path_for(Path("d/indian_images/val/images/a.jpg"))))
+    check("swmc: --compare spec splits correctly with Windows drive letters",
+          split_weights_data(r"C:\runs\best.pt:C:\data\decision.yaml")
+          == (r"C:\runs\best.pt", r"C:\data\decision.yaml"),
+          str(split_weights_data(r"C:\runs\best.pt:C:\data\decision.yaml")))
+    check("swmc: --compare spec splits correctly with absolute POSIX paths",
+          split_weights_data("/h/u/best.pt:/h/u/d.yaml")
+          == ("/h/u/best.pt", "/h/u/d.yaml"),
+          str(split_weights_data("/h/u/best.pt:/h/u/d.yaml")))
+
+    # -- the experiment-validity test ---------------------------------------
+    # Build a miniature dataset and run the real remapper at all three levels.
+    # If they disagree on box count, the granularity comparison is measuring a
+    # difference in DATA, and any conclusion drawn from it is worthless.
+    names = ["car", "truck", "bus", "tanker", "autorickshaw", "motorcycle",
+             "person", "cow", "traffic cone", "unmappable widget"]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / "src"
+        src.mkdir(parents=True)
+        (src / "data.yaml").write_text(
+            "train: train/images\nval: val/images\nnames:\n"
+            + "\n".join(f"  {i}: {n}" for i, n in enumerate(names)),
+            encoding="utf-8")
+        for split in ("train", "val"):
+            (src / split / "images").mkdir(parents=True)
+            (src / split / "labels").mkdir(parents=True)
+            for k in range(4):
+                (src / split / "images" / f"{k:03d}.jpg").write_bytes(b"\xff\xd8\xff")
+                rows = [f"{(k * 3 + j) % len(names)} 0.5 0.5 0.2 0.3"
+                        for j in range(3)]
+                (src / split / "labels" / f"{k:03d}.txt").write_text(
+                    "\n".join(rows), encoding="utf-8")
+
+        counts, class_counts, ok = {}, {}, True
+        for level in ("fine", "semantic", "decision"):
+            r = subprocess.run(
+                [sys.executable, str(PROJECT_ROOT / "data" / "prepare_taxonomy.py"),
+                 "--src", str(src), "--level", level, "--out", str(tmp / level)],
+                capture_output=True, text=True, cwd=str(PROJECT_ROOT), timeout=180)
+            if r.returncode != 0:
+                ok = False
+                counts[level] = f"crashed: {r.stderr.strip()[-200:]}"
+                continue
+            total = 0
+            for split in ("train", "val"):
+                for f in (tmp / level / split / "labels").glob("*.txt"):
+                    total += len(f.read_text(encoding="utf-8").strip().splitlines())
+            counts[level] = total
+            for line in r.stdout.splitlines():
+                if line.startswith("source classes"):
+                    class_counts[level] = line.split("->")[-1].strip()
+
+        check("granularity: all three levels build without error", ok, str(counts))
+        check("granularity: the three prepared datasets contain IDENTICAL box "
+              "counts -- same boxes, only the labels differ",
+              len(set(counts.values())) == 1, str(counts))
+        n = {k: int(v.rsplit(":", 1)[1]) for k, v in class_counts.items()}
+        check("granularity: each level really does collapse the label space "
+              "(fine > semantic > decision in class count)",
+              len(n) == 3 and n["fine"] > n["semantic"] > n["decision"] == 6,
+              str(n))
+        check("granularity: the unmappable class was dropped, not silently "
+              "bucketed into a real group",
+              all(isinstance(v, int) and v < 24 for v in counts.values()),
+              str(counts))
+
 
 def test_clrnet_coord_scaling():
     # Calls the REAL remap_to_frame. The previous version of this test
@@ -605,6 +894,9 @@ def main():
          test_optional_module_degradation),
         ("Heuristic lane-type classifier (no-weights fallback)",
          test_heuristic_lane_type),
+        ("Decision taxonomy + safety-weighted cost", test_taxonomy),
+        ("SWMC metric + granularity experiment validity",
+         test_swmc_and_granularity),
         ("CLRNet coordinate-scaling regression", test_clrnet_coord_scaling),
     ]:
         print(f"\n--- {name} ---")

@@ -1,0 +1,152 @@
+#!/bin/bash
+# GRANULARITY EXPERIMENT — STEP 2: train ONE label space
+#
+# Submit once per granularity; the three runs are independent and may queue in
+# parallel:
+#
+#   qsub -v LEVEL=fine     training/pbs/granularity_step2_train.pbs
+#   qsub -v LEVEL=semantic training/pbs/granularity_step2_train.pbs
+#   qsub -v LEVEL=decision training/pbs/granularity_step2_train.pbs
+#
+# EVERY hyperparameter below is identical across the three runs, including the
+# random seed and deterministic mode. That is not tidiness -- it is the entire
+# basis of the claim. If the runs differed in epochs, augmentation or seed, the
+# measured difference could not be attributed to the taxonomy, and the result
+# would not survive a reviewer asking "how do you know?".
+#
+#PBS -N Gran_Train
+#PBS -l select=1:ncpus=8:ngpus=1:mem=40gb
+#PBS -q gpu
+#PBS -l walltime=24:00:00
+#PBS -o /home/krish.123449/logs/gran_step2.log
+#PBS -j oe
+#
+# NOTE: `#PBS -V` is deliberately ABSENT — it exports the submitting shell's
+# CONDA_PREFIX/CONDA_SHLVL, after which `conda activate` silently does nothing.
+
+# NOTE: deliberately NOT using `set -u`; `conda activate` reads unset variables
+# in a non-interactive shell and would abort under it.
+set -o pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+
+if [ -z "$LEVEL" ]; then
+    echo "ERROR: no LEVEL given."
+    echo "Submit as:  qsub -v LEVEL=decision training/pbs/granularity_step2_train.pbs"
+    exit 1
+fi
+case "$LEVEL" in
+    fine|semantic|decision) ;;
+    *) echo "ERROR: LEVEL must be fine, semantic or decision (got '$LEVEL')"; exit 1 ;;
+esac
+
+source /home/soft/anaconda3/etc/profile.d/conda.sh
+conda activate auto_det
+
+case "$(command -v python)" in
+    *auto_det*) ;;
+    *)
+        ENV_BIN="$(conda info --base 2>/dev/null)/envs/auto_det/bin"
+        if [ -x "$ENV_BIN/python" ]; then
+            echo "conda activate did not take effect; using $ENV_BIN directly"
+            export PATH="$ENV_BIN:$PATH"
+        fi
+        ;;
+esac
+
+export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+echo "python : $(command -v python)"
+echo "yolo   : $(command -v yolo || echo 'NOT FOUND')"
+case "$(command -v python)" in
+    *auto_det*) echo "conda environment: OK" ;;
+    *) echo "ERROR: python resolved to $(command -v python), not auto_det"; exit 1 ;;
+esac
+
+DATA="data/gran_$LEVEL/$LEVEL.yaml"
+if [ ! -f "$DATA" ]; then
+    echo "ERROR: $DATA not found — run granularity_step1_prepare.pbs first."
+    exit 1
+fi
+
+# Start from COCO-pretrained weights, NOT from the KITTI-adapted checkpoint.
+# The checkpoint's head is shaped for a different label space, and more
+# importantly it carries whatever biases the earlier training left behind --
+# which would not be identical across the three runs.
+BASE=yolo11x.pt
+
+echo "============================================"
+echo "  GRANULARITY EXPERIMENT — TRAIN [$LEVEL]"
+echo "  data : $DATA"
+echo "  GPU  : $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
+echo "  $(date)"
+echo "============================================"
+python -c "
+import yaml
+cfg = yaml.safe_load(open('$DATA'))
+print('classes:', len(cfg['names']))
+print(cfg['names'])
+"
+
+yolo detect train \
+  model=$BASE \
+  data=$DATA \
+  imgsz=640 \
+  epochs=100 \
+  patience=25 \
+  batch=16 \
+  device=0 \
+  seed=0 \
+  deterministic=True \
+  optimizer=AdamW \
+  lr0=0.001 \
+  lrf=0.01 \
+  cos_lr=True \
+  warmup_epochs=3 \
+  weight_decay=0.0005 \
+  mosaic=1.0 \
+  mixup=0.15 \
+  copy_paste=0.3 \
+  hsv_v=0.6 \
+  degrees=5.0 \
+  fliplr=0.5 \
+  save_period=25 \
+  workers=8 \
+  amp=True \
+  project=runs/granularity \
+  name="$LEVEL" \
+  exist_ok=True
+
+echo ""
+echo "############ native-space validation [$LEVEL] ############"
+echo "This mAP is NOT comparable across granularities — each model is scored on"
+echo "its own label space, and a smaller space is an easier problem. The"
+echo "comparable numbers come from step 3, which projects all three into one"
+echo "common space. Reported here only because it is what everyone expects to"
+echo "see, and because its divergence from SWMC is itself part of the finding."
+python - <<PY
+from ultralytics import YOLO
+m = YOLO("runs/granularity/$LEVEL/weights/best.pt")
+r = m.val(data="$DATA", imgsz=640, batch=32, device=0,
+          project="runs/granularity", name="${LEVEL}_val", exist_ok=True)
+print()
+print("=== [$LEVEL] native-space validation ===")
+print(f"classes      : {len(r.names)}")
+print(f"mAP@0.5      : {r.box.map50*100:.2f}%")
+print(f"mAP@0.5:0.95 : {r.box.map*100:.2f}%")
+print(f"Precision    : {r.box.mp*100:.2f}%")
+print(f"Recall       : {r.box.mr*100:.2f}%")
+print()
+print("Per-class mAP@0.5:")
+for name, ap in zip(r.names.values(), r.box.ap50):
+    print(f"  {name:<20}: {ap*100:.2f}%")
+PY
+
+echo ""
+echo "============================================"
+echo "  DONE [$LEVEL]  $(date)"
+echo "  Once ALL THREE have finished:"
+echo "    qsub training/pbs/granularity_step3_compare.pbs"
+echo "============================================"

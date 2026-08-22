@@ -1,0 +1,116 @@
+#!/bin/bash
+# GRANULARITY EXPERIMENT — STEP 1: build the three label spaces
+#
+# Takes ONE Indian dataset and emits three copies of it that contain the SAME
+# images and the SAME boxes, differing only in how those boxes are labelled:
+#
+#   fine      the source dataset's own classes          (control)
+#   semantic  grouped by appearance, IDD level-3 style  (second control)
+#   decision  the six decision-consequence groups       (ours)
+#
+# The second control is what makes the experiment mean something. Without it a
+# reviewer can only conclude "fewer classes scores higher", which is trivially
+# true. With it, the question becomes whether grouping by DECISION CONSEQUENCE
+# beats grouping by APPEARANCE at a comparable class count -- and that is the
+# claim the paper actually makes.
+#
+# Images are symlinked, not copied, so three datasets cost one dataset of disk.
+#
+# Submit:  qsub training/pbs/granularity_step1_prepare.pbs
+#PBS -N Gran_Prepare
+#PBS -l select=1:ncpus=8:mem=16gb
+#PBS -q workq
+#PBS -l walltime=04:00:00
+#PBS -o /home/krish.123449/logs/gran_step1.log
+#PBS -j oe
+#
+# NOTE: `#PBS -V` is deliberately ABSENT — it exports the submitting shell's
+# CONDA_PREFIX/CONDA_SHLVL, after which `conda activate` believes the shell is
+# already activated and silently does nothing, leaving /bin/python on PATH.
+
+# NOTE: deliberately NOT using `set -u`. `conda activate` references variables
+# (PS1 among others) that are unset in a non-interactive batch shell, and under
+# `set -u` the activation aborts silently.
+set -o pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+
+source /home/soft/anaconda3/etc/profile.d/conda.sh
+conda activate auto_det
+
+case "$(command -v python)" in
+    *auto_det*) ;;
+    *)
+        ENV_BIN="$(conda info --base 2>/dev/null)/envs/auto_det/bin"
+        if [ -x "$ENV_BIN/python" ]; then
+            echo "conda activate did not take effect; using $ENV_BIN directly"
+            export PATH="$ENV_BIN:$PATH"
+        fi
+        ;;
+esac
+
+export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
+
+echo "python : $(command -v python)"
+case "$(command -v python)" in
+    *auto_det*) echo "conda environment: OK" ;;
+    *) echo "ERROR: python resolved to $(command -v python), not auto_det"; exit 1 ;;
+esac
+
+SRC=data/merged_india_yolo
+if [ ! -d "$SRC" ]; then
+    echo "ERROR: $SRC not found — run training/pbs/india_step1_prepare.pbs first."
+    exit 1
+fi
+
+echo "============================================"
+echo "  GRANULARITY EXPERIMENT — DATASET BUILD"
+echo "  source: $SRC"
+echo "  $(date)"
+echo "============================================"
+
+for LEVEL in fine semantic decision; do
+    echo ""
+    echo "########## $LEVEL ##########"
+    python data/prepare_taxonomy.py \
+        --src "$SRC" \
+        --level "$LEVEL" \
+        --out "data/gran_$LEVEL" || exit 1
+done
+
+# The experiment is only valid if the three datasets hold identical boxes. If
+# they do not, one taxonomy is being scored on easier data than another and any
+# conclusion drawn from the comparison is an artefact. Checked here, before six
+# GPU-hours are spent on it.
+echo ""
+echo "########## VALIDITY CHECK — identical box counts ##########"
+python - <<'PY' || exit 1
+from pathlib import Path
+counts = {}
+for level in ("fine", "semantic", "decision"):
+    total = 0
+    for split in ("train", "val"):
+        d = Path(f"data/gran_{level}") / split / "labels"
+        for f in d.glob("*.txt"):
+            total += len(f.read_text().strip().splitlines())
+    counts[level] = total
+    print(f"  {level:<10} {total:>9} boxes")
+if len(set(counts.values())) != 1:
+    raise SystemExit(
+        "\nFAILED: the three datasets do not contain the same boxes.\n"
+        "The granularity comparison would measure a difference in DATA rather\n"
+        "than in taxonomy. Check models/taxonomy.py — NAME_TO_GROUP and\n"
+        "IDD_LEVEL3_GROUPS must cover exactly the same source class names.")
+print("\nOK: all three label spaces cover identical boxes.")
+PY
+
+echo ""
+echo "============================================"
+echo "  DONE  $(date)"
+echo "  Next, submit the three trainings (they are independent"
+echo "  and may queue in parallel):"
+echo "    qsub -v LEVEL=fine     training/pbs/granularity_step2_train.pbs"
+echo "    qsub -v LEVEL=semantic training/pbs/granularity_step2_train.pbs"
+echo "    qsub -v LEVEL=decision training/pbs/granularity_step2_train.pbs"
+echo "============================================"
