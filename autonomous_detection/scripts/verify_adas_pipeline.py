@@ -144,6 +144,75 @@ def test_collision():
 # 3. IPM: straight lane -> large radius, curved lane -> small radius
 # --------------------------------------------------------------------------
 
+def test_group_scaled_margins():
+    """The decision taxonomy must actually change what the system does.
+
+    A grouping that only relabels boxes is a labelling scheme, not a decision
+    layer. These checks confirm the group's ttc_margin_scale reaches the
+    collision thresholds -- a pedestrian gets a longer margin than a car
+    because the group says so, not because a constant was tuned per class.
+    """
+    from inference.collision import CollisionDetector
+    from models.taxonomy import GROUP_BEHAVIOUR
+
+    class FakeDepth:
+        def infer(self, frame):
+            return np.full(frame.shape[:2], 30.0, dtype=np.float32)
+
+    det = CollisionDetector(FakeDepth(), fps=30)
+    base_c, base_w = det.critical_ttc, det.warning_ttc
+
+    def thresholds(class_name):
+        return det._thresholds_for(FakeDet((0, 0, 10, 10), 0.9, 0, class_name))
+
+    ped_c, ped_w = thresholds("pedestrian")
+    car_c, car_w = thresholds("car")
+    truck_c, _ = thresholds("truck")
+    cone_c, _ = thresholds("traffic cone")
+
+    check("margins: a pedestrian gets a LONGER brake margin than a car",
+          ped_c > car_c, f"pedestrian={ped_c:.2f} car={car_c:.2f}")
+    check("margins: the pedestrian margin equals the base times the group's "
+          "documented scale (the taxonomy is the source, not a tuned constant)",
+          abs(ped_c - base_c * GROUP_BEHAVIOUR["VULNERABLE"]["ttc_margin_scale"]) < 1e-9,
+          f"{ped_c} vs {base_c * GROUP_BEHAVIOUR['VULNERABLE']['ttc_margin_scale']}")
+    check("margins: a heavy vehicle gets a longer margin than a car "
+          "(longer stopping distance, blocks the view)",
+          truck_c > car_c, f"truck={truck_c:.2f} car={car_c:.2f}")
+    check("margins: an animal is treated as VULNERABLE, like a pedestrian "
+          "(cattle on the carriageway is an Indian-road norm, not an outlier)",
+          abs(thresholds("cow")[0] - ped_c) < 1e-9)
+    check("margins: every India-specific class reaches a group",
+          all(det._group_of(FakeDet((0, 0, 10, 10), 0.9, 0, n)) is not None
+              for n in ("autorickshaw", "tempo traveller", "water tanker",
+                        "pushcart", "buffalo", "mini bus")),
+          str({n: det._group_of(FakeDet((0, 0, 10, 10), 0.9, 0, n))
+               for n in ("autorickshaw", "tempo traveller", "water tanker",
+                         "pushcart", "buffalo", "mini bus")}))
+    check("margins: an unrecognised class falls back to the base thresholds "
+          "rather than inheriting a pedestrian's margin or a cone's",
+          thresholds("flying saucer") == (base_c, base_w))
+    check("margins: a detector that already emits group names is handled "
+          "(a model trained on the decision taxonomy outputs these directly)",
+          thresholds("VULNERABLE") == (ped_c, ped_w))
+    check("margins: warning always sits further out than brake, for every group",
+          all(thresholds(n)[1] > thresholds(n)[0]
+              for n in ("pedestrian", "car", "truck", "autorickshaw",
+                        "motorcycle", "traffic cone")))
+
+    det.use_group_margins = False
+    check("margins: the scaling can be switched off, restoring the previous "
+          "uniform behaviour exactly",
+          thresholds("pedestrian") == (base_c, base_w))
+
+    det.use_group_margins = True
+    det.set_night_mode(True)
+    night_ped, _ = thresholds("pedestrian")
+    check("margins: night mode and group scaling compose, rather than one "
+          "overwriting the other",
+          night_ped > ped_c, f"night={night_ped:.2f} day={ped_c:.2f}")
+
+
 def test_ipm():
     from models.ipm import IPMTransformer
 
@@ -1200,6 +1269,8 @@ def main():
     for name, fn in [
         ("Tracker", test_tracker),
         ("Collision / TTC", test_collision),
+        ("Decision-group scaled collision margins",
+         test_group_scaled_margins),
         ("IPM ground-plane curvature", test_ipm),
         ("Metric curve radius vs known-radius arcs",
          test_curvature_metric_accuracy),

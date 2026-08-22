@@ -40,6 +40,12 @@ class CollisionDetector:
     history_len: int = 10
     min_closing_speed: float = 0.5       # m/s — below this, not approaching
 
+    # Scale the TTC thresholds by the object's decision group, so a pedestrian
+    # gets a longer margin than a car. Without this the taxonomy is only a
+    # labelling scheme; with it, the grouping actually changes what the system
+    # does -- which is the claim the whole design rests on.
+    use_group_margins: bool = True
+
     dist_history: dict = field(default_factory=dict)
     last_depth: Optional[np.ndarray] = None
 
@@ -47,6 +53,35 @@ class CollisionDetector:
         """Longer safety margins when driving in unlit darkness."""
         self.critical_ttc = 2.5 if is_dark_unlit else 1.5
         self.warning_ttc = 4.5 if is_dark_unlit else 3.0
+
+    def _group_of(self, track) -> Optional[str]:
+        """Decision group for a track, or None if the class is unrecognised.
+
+        Accepts a group name the detector already emits (a model trained on the
+        decision taxonomy outputs these directly) and otherwise maps the
+        fine-grained class name. Returns None rather than guessing, so an
+        unknown class falls back to the ungrouped thresholds instead of
+        silently receiving a pedestrian's margins or a cone's.
+        """
+        name = getattr(track, "class_name", None)
+        if not name:
+            return None
+        from models.taxonomy import GROUP_BEHAVIOUR, NAME_TO_GROUP, normalise
+        key = normalise(name)
+        if name in GROUP_BEHAVIOUR:
+            return name
+        return NAME_TO_GROUP.get(key)
+
+    def _thresholds_for(self, track) -> tuple:
+        """(critical_ttc, warning_ttc) for this object, group-scaled."""
+        if not self.use_group_margins:
+            return self.critical_ttc, self.warning_ttc
+        group = self._group_of(track)
+        if group is None:
+            return self.critical_ttc, self.warning_ttc
+        from models.taxonomy import GROUP_BEHAVIOUR
+        scale = GROUP_BEHAVIOUR[group]["ttc_margin_scale"]
+        return self.critical_ttc * scale, self.warning_ttc * scale
 
     def update(self, frame: np.ndarray, tracks: list, lanes=None) -> list[Alert]:
         self.last_depth = self.depth_model.infer(frame)
@@ -96,9 +131,10 @@ class CollisionDetector:
             if closing is not None and closing > self.min_closing_speed:
                 ttc = dist / closing
                 cls_name = getattr(t, "class_name", str(getattr(t, "cls", "?")))
-                if ttc < self.critical_ttc:
+                critical, warning = self._thresholds_for(t)
+                if ttc < critical:
                     alerts.append(Alert("BRAKE", t.track_id, cls_name, dist, ttc, tuple(t.bbox)))
-                elif ttc < self.warning_ttc:
+                elif ttc < warning:
                     alerts.append(Alert("WARNING", t.track_id, cls_name, dist, ttc, tuple(t.bbox)))
 
         # Drop history of vanished tracks
