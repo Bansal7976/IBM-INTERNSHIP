@@ -1,0 +1,5 @@
+# HPC job scripts and shell scripts must keep LF endings. A CRLF checkout
+# makes Linux fail them with "bad interpreter: /bin/bash^M", which reads as a
+# missing shell rather than as a line-ending problem.
+*.pbs text eol=lf
+*.sh  text eol=lf
