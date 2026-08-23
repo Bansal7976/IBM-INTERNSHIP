@@ -17,7 +17,7 @@
 #PBS -l select=1:ncpus=8:ngpus=1:mem=40gb
 #PBS -q gpu
 #PBS -l walltime=06:00:00
-#PBS -o /home/krish.123449/logs/gran_step3.log
+#PBS -o logs/gran_step3.log
 #PBS -j oe
 #
 # NOTE: `#PBS -V` is deliberately ABSENT — see step 1.

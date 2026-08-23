@@ -14,7 +14,7 @@
 #PBS -l select=1:ncpus=8:ngpus=1:mem=40gb
 #PBS -q gpu
 #PBS -l walltime=24:00:00
-#PBS -o /home/krish.123449/logs/india_step2.log
+#PBS -o logs/india_step2.log
 #PBS -j oe
 #
 # NOTE: `#PBS -V` is deliberately ABSENT — it exports the submitting shell's

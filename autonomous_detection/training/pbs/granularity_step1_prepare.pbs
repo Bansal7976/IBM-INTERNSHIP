@@ -22,7 +22,7 @@
 #PBS -l select=1:ncpus=8:mem=16gb
 #PBS -q workq
 #PBS -l walltime=04:00:00
-#PBS -o /home/krish.123449/logs/gran_step1.log
+#PBS -o logs/gran_step1.log
 #PBS -j oe
 #
 # NOTE: `#PBS -V` is deliberately ABSENT — it exports the submitting shell's

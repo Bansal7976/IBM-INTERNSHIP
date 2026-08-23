@@ -9,7 +9,7 @@
 #PBS -N India_Prepare
 #PBS -l select=1:ncpus=8:mem=32gb
 #PBS -q workq
-#PBS -o /home/krish.123449/logs/india_step1.log
+#PBS -o logs/india_step1.log
 #PBS -j oe
 #
 # NOTE: `#PBS -V` is deliberately ABSENT. It exports the submitting shell's
