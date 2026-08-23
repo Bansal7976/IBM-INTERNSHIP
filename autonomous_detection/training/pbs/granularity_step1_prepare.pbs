@@ -70,6 +70,26 @@ echo "  source: $SRC"
 echo "  $(date)"
 echo "============================================"
 
+# Before writing anything: what does the mapping actually keep?
+#
+# This takes seconds and answers the question that decides whether the run is
+# worth starting. It distinguishes boxes dropped BY DESIGN (traffic lights and
+# signs are not path obstacles, so their absence is correct) from boxes belonging
+# to classes the taxonomy simply does not recognise -- which is real data being
+# silently discarded, and a reason to stop and fix the mapping rather than spend
+# twenty-four GPU-hours training on a hole.
+echo ""
+echo "########## MAPPING REPORT — what survives, and what does not ##########"
+python data/prepare_taxonomy.py --src "$SRC" --report-only --max-dropped 0.05
+REPORT_STATUS=$?
+if [ $REPORT_STATUS -ne 0 ]; then
+    echo ""
+    echo "STOPPING. Too many boxes belong to classes models/taxonomy.py does not"
+    echo "recognise. Add them to NAME_TO_GROUP and IDD_LEVEL3_GROUPS (both, they"
+    echo "are checked for parity at import), then re-submit."
+    exit 1
+fi
+
 for LEVEL in fine semantic decision; do
     echo ""
     echo "########## $LEVEL ##########"
