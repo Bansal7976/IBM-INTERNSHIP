@@ -126,6 +126,31 @@ NAME_TO_GROUP = {
     "barrier": "STATIC_OBSTACLE", "traffic cone": "STATIC_OBSTACLE",
     "cone": "STATIC_OBSTACLE", "debris": "STATIC_OBSTACLE",
     "obstacle": "STATIC_OBSTACLE",
+
+    # --- IDD's open-world catch-all ---
+    # "vehicle fallback" is a MIXED bucket: IDD puts tractors, water tankers
+    # and excavators in it, and this project's converters additionally route
+    # handcarts and pushcarts there. No single group is right for all of it.
+    #
+    # HEAVY_VEHICLE is nonetheless the cost-optimal choice under our own
+    # metric, which is why it is not a guess. Calling a handcart a heavy
+    # vehicle is an over-caution error priced at 0.10; DROPPING the class
+    # instead makes every one of those objects a miss, priced at 0.44 for a
+    # static obstacle and 0.60 for a genuine heavy vehicle. Mapping wins by a
+    # factor of four to six, and it errs toward seeing an obstacle that is not
+    # quite what we called it rather than not seeing it at all.
+    "vehicle fallback": "HEAVY_VEHICLE",
+}
+
+# Classes that are deliberately NOT part of the obstacle taxonomy, as opposed
+# to ones we simply failed to recognise. The distinction matters in the drop
+# report: "excluded by design" is a decision, "unrecognised" is a gap that
+# needs a mapping added. Traffic lights and signs sit above the carriageway and
+# are never path obstacles; "misc" is an admission that the source label
+# carries no usable information.
+EXCLUDED_CLASSES = {
+    "traffic light", "trafficlight", "traffic sign", "trafficsign",
+    "misc", "miscellaneous", "other", "unknown", "background",
 }
 
 # A comparable grouping organised by APPEARANCE rather than decision
@@ -161,6 +186,7 @@ IDD_LEVEL3_GROUPS = {
     "street cart": "cart",
     "barrier": "obstacle", "traffic cone": "obstacle", "cone": "obstacle",
     "debris": "obstacle", "obstacle": "obstacle",
+    "vehicle fallback": "vehicle fallback",
     "train": "train", "tram": "train",
 }
 
