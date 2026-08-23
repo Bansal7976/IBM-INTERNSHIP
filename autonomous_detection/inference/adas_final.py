@@ -419,6 +419,33 @@ def main():
                   " --kitti_calib <calib.txt> for the true focal length, or"
                   " raise estimated_focal_extra_margin in sanity_filter.py.")
 
+    # How often the collision layer could actually measure a closing speed.
+    # Without this the module's silence is ambiguous: an empty road and a
+    # blinded detector produce exactly the same output. Printed on every run so
+    # a degraded pipeline announces itself instead of looking healthy.
+    cd = getattr(pipe, "collision", None)
+    st = cd.stats() if cd is not None and hasattr(cd, "stats") else None
+    if st:
+        print(f"\n[collision] {st['track_observations']} object sightings over "
+              f"{st['frames']} frames")
+        print(f"  closing-speed coverage : {st['closing_speed_coverage']:.2f}"
+              f"   (1.00 = TTC computable for every sighting)")
+        print(f"  new track ids          : {st['new_tracks']} "
+              f"({st['tracks_per_100_frames']:.1f} per 100 frames)")
+        print(f"  histories rescued      : {st['histories_rescued']} "
+              f"(recovered across an ID switch)")
+        print(f"  depth unresolvable     : {st['depth_unresolvable']}")
+        if st["closing_speed_coverage"] < 0.6:
+            print("  ⚠ Coverage is low: the collision layer was frequently unable"
+                  " to measure, so quiet stretches in the output do NOT mean the"
+                  " road was clear. Usual cause is tracker ID churn — check the"
+                  " new-ids rate against how many objects are really present.")
+        if st["histories_rescued"] > 0.3 * max(st["new_tracks"], 1):
+            print("  ⚠ A large share of tracks needed history recovery. The"
+                  " recovery is holding the module up, but the tracker itself is"
+                  " unstable — consider botsort.yaml (ReID) or a longer"
+                  " track_buffer for dense traffic.")
+
 
 if __name__ == "__main__":
     main()
