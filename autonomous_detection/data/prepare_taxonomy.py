@@ -66,47 +66,80 @@ def read_source_names(src: Path) -> dict:
     raise SystemExit(f"No dataset yaml with a 'names' block found in {src}")
 
 
-def build_mapping(level: str, source_names: dict):
-    """Return (id_map, class_list, unmapped_names) for the requested level."""
-    if level == "fine":
-        # Restricted to the shared vocabulary, not simply passed through. All
-        # three granularities must contain exactly the same boxes -- otherwise
-        # the fine model trains on objects the others never see, and the
-        # comparison measures a difference in data rather than in taxonomy.
-        classes, id_map, unmapped = [], {}, {}
-        for sid in sorted(source_names):
-            name = source_names[sid]
-            if normalise(name) not in NAME_TO_GROUP:
-                unmapped[name] = unmapped.get(name, 0) + 1
-                continue
-            id_map[sid] = len(classes)
-            classes.append(name)
-        return id_map, classes, unmapped
+def build_target_classes(level: str, all_source_names: list) -> list:
+    """The output class list, computed ONCE across every source.
 
-    if level == "semantic":
-        classes, id_map, unmapped = [], {}, {}
-        for sid in sorted(source_names):
-            g = IDD_LEVEL3_GROUPS.get(normalise(source_names[sid]))
-            if g is None:
-                unmapped[source_names[sid]] = unmapped.get(source_names[sid], 0) + 1
-                continue
-            if g not in classes:
-                classes.append(g)
-            id_map[sid] = classes.index(g)
-        classes_sorted = sorted(classes)
-        # re-index against the sorted list so the ordering is deterministic
-        remap = {classes.index(c): classes_sorted.index(c) for c in classes}
-        return {k: remap[v] for k, v in id_map.items()}, classes_sorted, unmapped
+    Building it per-source is wrong when sources are combined: UVH-26 carries
+    no pedestrians, so a semantic class list derived from it alone omits
+    "person" entirely, and every source's ids then index a different list. The
+    labels would point at the wrong classes and nothing would report an error.
 
+    Every level is restricted to the shared vocabulary, so all three arms end
+    up holding exactly the same boxes.
+    """
     if level == "decision":
-        tx = DecisionTaxonomy()
-        id_map = tx.map_id_from_names(source_names)
-        return id_map, list(DECISION_CLASSES), dict(tx.unmapped)
+        return list(DECISION_CLASSES)
 
-    raise SystemExit(f"unknown level {level!r}")
+    out, seen = [], set()
+    for source_names in all_source_names:
+        for cid in sorted(source_names):
+            name = source_names[cid]
+            key = normalise(name)
+            if key not in NAME_TO_GROUP:
+                continue
+            if level == "fine":
+                # Deduplicated on the normalised name, so "Truck" and "truck"
+                # are one class. Genuinely synonymous labels across datasets
+                # ("Three-Wheeler" vs "autorickshaw") stay separate: merging
+                # those is the taxonomy's job, and the fine arm is supposed to
+                # keep every distinction its sources drew.
+                target = name
+            else:
+                target = IDD_LEVEL3_GROUPS.get(key)
+                if target is None:
+                    continue
+            if normalise(target) in seen:
+                continue
+            seen.add(normalise(target))
+            out.append(target)
+    return out if level == "fine" else sorted(out)
 
 
-def convert_split(src: Path, out: Path, split: str, id_map: dict) -> dict:
+def build_mapping(level: str, source_names: dict, target_classes: list):
+    """Return (id_map, unmapped_names) mapping one source onto the target list."""
+    index = {normalise(c): i for i, c in enumerate(target_classes)}
+    id_map, unmapped = {}, {}
+    for cid in sorted(source_names):
+        name = source_names[cid]
+        key = normalise(name)
+        if level == "fine":
+            target = key
+        elif level == "semantic":
+            g = IDD_LEVEL3_GROUPS.get(key)
+            target = normalise(g) if g else None
+        elif level == "decision":
+            g = NAME_TO_GROUP.get(key)
+            target = normalise(g) if g else None
+        else:
+            raise SystemExit(f"unknown level {level!r}")
+
+        slot = index.get(target) if target else None
+        if slot is None:
+            unmapped[name] = unmapped.get(name, 0) + 1
+            continue
+        id_map[cid] = slot
+    return id_map, unmapped
+
+
+def convert_split(src: Path, out: Path, split: str, id_map: dict,
+                  prefix: str = "") -> dict:
+    """Convert one split of one source into `out`.
+
+    `prefix` namespaces the output stems. Several sources write into the same
+    directory, and two datasets can easily contain an image called 000123.jpg;
+    without the prefix the second would silently overwrite the first's label
+    file and the boxes would be attached to the wrong picture.
+    """
     src_img = src / split / "images"
     src_lbl = src / split / "labels"
     if not src_img.exists():
@@ -141,13 +174,14 @@ def convert_split(src: Path, out: Path, split: str, id_map: dict) -> dict:
         if not lines:
             continue
 
-        dst = out_img / img.name
+        stem = f"{prefix}{img.stem}"
+        dst = out_img / f"{stem}{img.suffix}"
         if not dst.exists():
             try:
                 dst.symlink_to(img.resolve())
             except OSError:
                 shutil.copy2(img, dst)
-        (out_lbl / f"{img.stem}.txt").write_text("\n".join(lines), encoding="utf-8")
+        (out_lbl / f"{stem}.txt").write_text("\n".join(lines), encoding="utf-8")
         stats["frames"] += 1
     return stats
 
@@ -246,8 +280,11 @@ def report(src: Path, max_dropped_frac: float) -> int:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", required=True, type=Path,
-                    help="source YOLO dataset directory (must contain a *.yaml)")
+    ap.add_argument("--src", required=True, type=Path, nargs="+",
+                    help="one or more source YOLO dataset directories, each "
+                         "containing a *.yaml. Several sources are combined "
+                         "into one dataset; for the fine arm their class lists "
+                         "are unioned rather than collapsed.")
     ap.add_argument("--level", choices=["fine", "semantic", "decision"],
                     help="required unless --report-only")
     ap.add_argument("--out", type=Path, help="required unless --report-only")
@@ -259,41 +296,53 @@ def main():
                          "dropped (default 0.10)")
     args = ap.parse_args()
 
-    if not args.src.exists():
-        raise SystemExit(f"{args.src} not found")
+    for src in args.src:
+        if not src.exists():
+            raise SystemExit(f"{src} not found")
 
     if args.report_only:
-        raise SystemExit(report(args.src, args.max_dropped))
+        raise SystemExit(max(report(src, args.max_dropped) for src in args.src))
     if not (args.level and args.out):
         raise SystemExit("--level and --out are required unless --report-only")
 
-    source_names = read_source_names(args.src)
-    id_map, classes, unmapped = build_mapping(args.level, source_names)
+    all_names = [read_source_names(src) for src in args.src]
+    classes = build_target_classes(args.level, all_names)
 
-    print(f"level        : {args.level}")
-    print(f"source classes: {len(source_names)}  ->  target classes: {len(classes)}")
-    print(f"target        : {classes}")
-    if unmapped:
-        by_design = [k for k in unmapped if normalise(k) in EXCLUDED_CLASSES]
-        gaps = [k for k in unmapped if normalise(k) not in EXCLUDED_CLASSES]
-        if by_design:
-            print(f"\n[info] excluded by design (not path obstacles): {sorted(by_design)}")
-        if gaps:
-            print("\n[WARNING] UNRECOGNISED source classes -- their boxes are")
-            print("          DROPPED, not reassigned. This is a gap in")
-            print("          models/taxonomy.py, not a decision:")
-            for k in sorted(gaps):
-                print(f"    {k!r}")
-            print("          Run with --report-only to see how many boxes this costs.")
+    print(f"level    : {args.level}")
+    print(f"sources  : {[str(s) for s in args.src]}")
 
-    totals = {}
-    for split in ("train", "val"):
-        totals[split] = convert_split(args.src, args.out, split, id_map)
+    totals = {"train": {"frames": 0, "boxes": 0, "dropped": 0},
+              "val": {"frames": 0, "boxes": 0, "dropped": 0}}
+    for i, (src, source_names) in enumerate(zip(args.src, all_names)):
+        id_map, unmapped = build_mapping(args.level, source_names, classes)
 
+        print(f"\n[{src.name}] {len(source_names)} classes -> {len(classes)}")
+        if unmapped:
+            by_design = [k for k in unmapped if normalise(k) in EXCLUDED_CLASSES]
+            gaps = [k for k in unmapped if normalise(k) not in EXCLUDED_CLASSES]
+            if by_design:
+                print(f"  excluded by design (not path obstacles): {sorted(by_design)}")
+            if gaps:
+                print("  [WARNING] UNRECOGNISED classes -- their boxes are DROPPED,")
+                print("            not reassigned. This is a gap in")
+                print(f"            models/taxonomy.py, not a decision: {sorted(gaps)}")
+                print("            Run --report-only to see how many boxes it costs.")
+
+        # Namespace the stems per source: two datasets can each contain an
+        # image called 000123.jpg, and without this the second would overwrite
+        # the first's labels.
+        prefix = f"s{i}_" if len(args.src) > 1 else ""
+        for split in ("train", "val"):
+            s = convert_split(src, args.out, split, id_map, prefix)
+            for k in totals[split]:
+                totals[split][k] += s[k]
+
+    print(f"\ntarget classes ({len(classes)}): {classes}")
     names_block = "\n".join(f"  {i}: {c}" for i, c in enumerate(classes))
     (args.out / f"{args.level}.yaml").write_text(
         f"# Granularity: {args.level}  ({len(classes)} classes)\n"
-        f"# Built by data/prepare_taxonomy.py from {args.src}\n"
+        f"# Built by data/prepare_taxonomy.py from "
+        f"{', '.join(str(s) for s in args.src)}\n"
         f"path: {args.out.resolve()}\n"
         f"train: train/images\nval: val/images\nnames:\n{names_block}\n",
         encoding="utf-8")
@@ -303,6 +352,8 @@ def main():
         print(f"{split:<6} frames={s['frames']:>6}  boxes={s['boxes']:>7}  "
               f"dropped={s['dropped']:>6}")
     print(f"\nconfig: {args.out / (args.level + '.yaml')}")
+    print("\nThe three levels must report IDENTICAL box counts. If they do not,")
+    print("the comparison measures a difference in data, not in taxonomy.")
 
 
 if __name__ == "__main__":

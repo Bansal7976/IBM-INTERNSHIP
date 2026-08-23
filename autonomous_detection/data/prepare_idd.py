@@ -81,7 +81,19 @@ def _parse_split_list(root: Path, split: str) -> list[str] | None:
     return None
 
 
-def convert_split(root: Path, split: str, out_dir: Path) -> dict:
+def convert_split(root: Path, split: str, out_dir: Path,
+                  name_index: dict | None = None) -> dict:
+    """Convert one split to YOLO format.
+
+    With `name_index` supplied, IDD's own label names are PRESERVED rather than
+    collapsed onto the project's 15-class taxonomy: each new name is assigned
+    the next free id in that shared dict, which the caller passes across both
+    splits so train and val agree.
+
+    That mode exists for the granularity experiment. Collapsing the labels
+    first and then measuring what collapsing costs would be circular -- the
+    unified taxonomy has already discarded exactly the distinctions under test.
+    """
     out_images = out_dir / "images"
     out_labels = out_dir / "labels"
     out_images.mkdir(parents=True, exist_ok=True)
@@ -123,7 +135,13 @@ def convert_split(root: Path, split: str, out_dir: Path) -> dict:
         lines = []
         for obj in root_el.findall("object"):
             name = _normalize(obj.findtext("name", ""))
-            cls = IDD_TO_UNIFIED.get(name)
+            if name_index is not None:
+                # Preserve IDD's own vocabulary. Nothing is unknown in this
+                # mode -- an unfamiliar name is a class we had not seen yet,
+                # not one to drop.
+                cls = name_index.setdefault(name, len(name_index))
+            else:
+                cls = IDD_TO_UNIFIED.get(name)
             if cls is None:
                 stats["unknown_classes"][name] = stats["unknown_classes"].get(name, 0) + 1
                 continue
@@ -163,6 +181,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", default="data/IDD_Detection")
     ap.add_argument("--out", default="data/idd_yolo")
+    ap.add_argument("--keep-source-names", action="store_true",
+                    help="keep IDD's own label names instead of collapsing "
+                         "onto the project's 15-class taxonomy. Use this to "
+                         "build the fine-grained arm of the granularity "
+                         "experiment.")
     args = ap.parse_args()
 
     root, out = Path(args.data_root), Path(args.out)
@@ -172,12 +195,29 @@ def main():
             "https://idd.insaan.iiit.ac.in/ (see this file's docstring).")
 
     all_unknown: dict[str, int] = {}
+    # Shared across both splits so train and val agree on the class ids.
+    name_index: dict[str, int] | None = {} if args.keep_source_names else None
     for split in ("train", "val"):
-        stats = convert_split(root, split, out / split)
+        stats = convert_split(root, split, out / split, name_index)
         print(f"\n{split}: {stats['frames']} frames, {stats['boxes']} boxes, "
               f"{stats['skipped_boxes']} tiny boxes skipped")
         for k, v in stats["unknown_classes"].items():
             all_unknown[k] = all_unknown.get(k, 0) + v
+
+    if name_index is not None:
+        ordered = [n for n, _ in sorted(name_index.items(), key=lambda kv: kv[1])]
+        body = "\n".join(f"  {i}: {n}" for i, n in enumerate(ordered))
+        (out / "idd_native.yaml").write_text(
+            "# IDD Detection with its OWN label names preserved.\n"
+            "# Built for the granularity experiment -- see\n"
+            "# data/prepare_taxonomy.py and SIH_2026_PLAN.md Part 2.\n"
+            f"path: {out.resolve()}\ntrain: train/images\nval: val/images\n"
+            f"names:\n{body}\n", encoding="utf-8")
+        print(f"\n{len(ordered)} native classes: {ordered}")
+        print(f"Wrote {out / 'idd_native.yaml'}")
+        print("\nCheck they all map before spending GPU time:")
+        print(f"  python data/prepare_taxonomy.py --src {out} --report-only")
+        return
 
     if all_unknown:
         print("\n[WARNING] Unmapped class names seen (not converted — add "

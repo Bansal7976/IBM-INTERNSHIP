@@ -1131,6 +1131,134 @@ def test_taxonomy():
 #     exercises the exact arithmetic that was buggy)
 # --------------------------------------------------------------------------
 
+def test_multi_source_granularity():
+    """Combining several Indian datasets into one granularity experiment.
+
+    The fine arm has to be genuinely fine-grained for the comparison to mean
+    anything, and the project's merged 15-class taxonomy has already collapsed
+    the distinctions under test -- measuring what collapsing costs on labels
+    that are already collapsed is circular. So the arms are built from IDD and
+    UVH-26 with their OWN vocabularies preserved and unioned.
+
+    That union is where the correctness risk sits, and these checks target it:
+    UVH-26 carries no pedestrians, so a class list derived per-source omits
+    "person" from the semantic arm, and each source's ids then index a
+    different list. Labels would point at the wrong classes with nothing
+    reporting an error.
+    """
+    import subprocess
+    import tempfile
+
+    import yaml
+
+    vocabularies = {
+        # IDD-like: has the vulnerable road users UVH-26 lacks.
+        "idd": ["car", "bus", "truck", "person", "rider", "motorcycle",
+                "bicycle", "autorickshaw", "animal", "vehicle fallback",
+                "traffic sign", "caravan"],
+        # UVH-26-like: body-type granularity, vehicles only.
+        "uvh": ["Hatchback", "Sedan", "SUV", "MUV", "Van", "LCV",
+                "Tempo-Traveller", "Mini-Bus", "Bus", "Truck", "Three-Wheeler",
+                "Two-Wheeler", "Bicycle", "Other"],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        srcs = []
+        for tag, names in vocabularies.items():
+            root = tmp / tag
+            root.mkdir(parents=True)
+            (root / f"{tag}.yaml").write_text(
+                "train: train/images\nval: val/images\nnames:\n"
+                + "\n".join(f"  {i}: {n}" for i, n in enumerate(names)),
+                encoding="utf-8")
+            for split, n_img in (("train", 6), ("val", 3)):
+                (root / split / "images").mkdir(parents=True)
+                (root / split / "labels").mkdir(parents=True)
+                for k in range(n_img):
+                    # Deliberately identical filenames across both sources.
+                    (root / split / "images" / f"{k:03d}.jpg").write_bytes(b"\xff\xd8\xff")
+                    rows = [f"{j} 0.5 0.5 0.2 0.3" for j in range(len(names))]
+                    (root / split / "labels" / f"{k:03d}.txt").write_text(
+                        "\n".join(rows), encoding="utf-8")
+            srcs.append(str(root))
+
+        results = {}
+        for level in ("fine", "semantic", "decision"):
+            out = tmp / f"g_{level}"
+            r = subprocess.run(
+                [sys.executable, str(PROJECT_ROOT / "data" / "prepare_taxonomy.py"),
+                 "--src", *srcs, "--level", level, "--out", str(out)],
+                capture_output=True, text=True, cwd=str(PROJECT_ROOT), timeout=300)
+            if r.returncode != 0:
+                results[level] = {"error": r.stderr.strip()[-300:]}
+                continue
+
+            cfg = yaml.safe_load((out / f"{level}.yaml").read_text(encoding="utf-8"))
+            names = cfg["names"]
+            names = ({int(k): v for k, v in names.items()} if isinstance(names, dict)
+                     else dict(enumerate(names)))
+            boxes, frames, max_id = 0, 0, -1
+            for split in ("train", "val"):
+                for f in (out / split / "labels").glob("*.txt"):
+                    frames += 1
+                    for line in f.read_text(encoding="utf-8").strip().splitlines():
+                        boxes += 1
+                        max_id = max(max_id, int(line.split()[0]))
+            results[level] = {"names": names, "n_classes": len(names),
+                              "boxes": boxes, "frames": frames, "max_id": max_id}
+
+        errors = {k: v.get("error") for k, v in results.items() if "error" in v}
+        check("multi-source: all three levels build from two sources at once",
+              not errors, str(errors))
+        if errors:
+            return
+
+        check("multi-source: the three arms hold IDENTICAL box counts, so the "
+              "comparison measures taxonomy and not data",
+              len({r["boxes"] for r in results.values()}) == 1,
+              str({k: v["boxes"] for k, v in results.items()}))
+
+        # The check that catches the real bug: an id outside the declared class
+        # list means the labels and the config disagree, and nothing else in
+        # the pipeline would report it.
+        for level, r in results.items():
+            check(f"multi-source [{level}]: every label id is within the "
+                  f"declared class list (a per-source list would put them out "
+                  f"of range)",
+                  r["max_id"] < r["n_classes"],
+                  f"max id {r['max_id']} vs {r['n_classes']} classes")
+
+        sem = {v.lower() for v in results["semantic"]["names"].values()}
+        check("multi-source: the semantic arm keeps classes present in only ONE "
+              "source -- UVH-26 has no pedestrians, and building its class list "
+              "per-source silently dropped 'person'",
+              {"person", "rider", "animal"} <= sem, str(sorted(sem)))
+
+        fine = {v.lower() for v in results["fine"]["names"].values()}
+        check("multi-source: the fine arm keeps body-type granularity, which is "
+              "the distinction the decision taxonomy argues is unnecessary",
+              {"hatchback", "sedan", "suv"} <= fine, str(sorted(fine)))
+        check("multi-source: the fine arm merges names differing only in case "
+              "('Truck' and 'truck' are one class)",
+              sum(1 for n in fine if n == "truck") == 1
+              and results["fine"]["n_classes"] < sum(
+                  len(v) for v in vocabularies.values()),
+              str(results["fine"]["n_classes"]))
+
+        n = {k: v["n_classes"] for k, v in results.items()}
+        check("multi-source: the arms are a genuine spread, not three near-"
+              "identical class counts",
+              n["fine"] > 2 * n["semantic"] > n["decision"] == 6, str(n))
+
+        expected_frames = {"train": 12, "val": 6}
+        check("multi-source: identically-named images from different sources do "
+              "not overwrite each other",
+              results["decision"]["frames"] == sum(expected_frames.values()),
+              f"{results['decision']['frames']} frames, expected "
+              f"{sum(expected_frames.values())}")
+
+
 def test_swmc_and_granularity():
     """SWMC scoring, and the experiment-validity guarantees around it.
 
@@ -1302,14 +1430,14 @@ def test_swmc_and_granularity():
                     total += len(f.read_text(encoding="utf-8").strip().splitlines())
             counts[level] = total
             for line in r.stdout.splitlines():
-                if line.startswith("source classes"):
-                    class_counts[level] = line.split("->")[-1].strip()
+                if line.startswith("target classes ("):
+                    class_counts[level] = line.split("(")[1].split(")")[0]
 
         check("granularity: all three levels build without error", ok, str(counts))
         check("granularity: the three prepared datasets contain IDENTICAL box "
               "counts -- same boxes, only the labels differ",
               len(set(counts.values())) == 1, str(counts))
-        n = {k: int(v.rsplit(":", 1)[1]) for k, v in class_counts.items()}
+        n = {k: int(v) for k, v in class_counts.items()}
         check("granularity: each level really does collapse the label space "
               "(fine > semantic > decision in class count)",
               len(n) == 3 and n["fine"] > n["semantic"] > n["decision"] == 6,
@@ -1396,6 +1524,8 @@ def main():
         ("Heuristic lane-type classifier (no-weights fallback)",
          test_heuristic_lane_type),
         ("Decision taxonomy + safety-weighted cost", test_taxonomy),
+        ("Multi-source granularity build (IDD + UVH-26 union)",
+         test_multi_source_granularity),
         ("SWMC metric + granularity experiment validity",
          test_swmc_and_granularity),
         ("CLRNet coordinate-scaling regression", test_clrnet_coord_scaling),

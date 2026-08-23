@@ -1,8 +1,9 @@
 #!/bin/bash
 # GRANULARITY EXPERIMENT — STEP 1: build the three label spaces
 #
-# Takes ONE Indian dataset and emits three copies of it that contain the SAME
-# images and the SAME boxes, differing only in how those boxes are labelled:
+# Takes the Indian datasets and emits three copies of them that contain the
+# SAME images and the SAME boxes, differing only in how those boxes are
+# labelled:
 #
 #   fine      the source dataset's own classes          (control)
 #   semantic  grouped by appearance, IDD level-3 style  (second control)
@@ -58,15 +59,64 @@ case "$(command -v python)" in
     *) echo "ERROR: python resolved to $(command -v python), not auto_det"; exit 1 ;;
 esac
 
-SRC=data/merged_india_yolo
-if [ ! -d "$SRC" ]; then
-    echo "ERROR: $SRC not found — run training/pbs/india_step1_prepare.pbs first."
-    exit 1
+# Prefer the NATIVE-vocabulary conversions over the merged 15-class set.
+#
+# The merged taxonomy has already collapsed exactly the distinctions the
+# experiment is meant to measure -- Hatchback, Sedan, SUV and MUV are one "car"
+# in it -- so a fine arm built from it is not fine-grained, and measuring what
+# collapsing costs on already-collapsed labels is circular. Built natively the
+# arms span roughly 21 / 10 / 6 classes; from the merged set they would be
+# 12 / 11 / 6, and 12 against 11 tests nothing.
+#
+# UVH-26 alone is vehicles only -- no pedestrians, riders or animals -- so the
+# VULNERABLE group would never be exercised and the whole safety argument would
+# go untested. IDD supplies those, which is why both are wanted.
+#
+# Both conversions are cheap and reuse data already on disk, so they are built
+# here rather than left as a manual step to forget.
+if [ ! -d data/uvh26_native ] && [ -d data/UVH26 ]; then
+    echo "Building UVH-26 with its native body-type classes ..."
+    python data/prepare_uvh26.py --data_root data/UVH26 \
+        --out data/uvh26_native --keep-source-names || exit 1
 fi
+if [ ! -d data/idd_native ] && [ -d data/IDD_Detection ]; then
+    echo "Building IDD with its native label names ..."
+    python data/prepare_idd.py --data_root data/IDD_Detection \
+        --out data/idd_native --keep-source-names || exit 1
+fi
+
+SRCS=""
+for candidate in data/idd_native data/uvh26_native; do
+    [ -d "$candidate" ] && SRCS="$SRCS $candidate"
+done
+
+if [ -z "$SRCS" ]; then
+    echo "No native-vocabulary sources found; falling back to the merged set."
+    echo "The fine arm will be weaker — see the note above."
+    SRCS=data/merged_india_yolo
+fi
+
+for s in $SRCS; do
+    if [ ! -d "$s" ]; then
+        echo "ERROR: $s not found — run training/pbs/india_step1_prepare.pbs first."
+        exit 1
+    fi
+done
+echo "sources: $SRCS"
+
+case "$SRCS" in
+    *idd_native*) ;;
+    *) echo ""
+       echo "NOTE: no IDD source. UVH-26 is vehicles only, so VULNERABLE"
+       echo "      (pedestrians, riders, animals) will not appear in any arm"
+       echo "      and the safety-weighted result will not test the case it"
+       echo "      exists for. Add data/idd_native when IDD access comes"
+       echo "      through, and re-run." ;;
+esac
 
 echo "============================================"
 echo "  GRANULARITY EXPERIMENT — DATASET BUILD"
-echo "  source: $SRC"
+echo "  sources:$SRCS"
 echo "  $(date)"
 echo "============================================"
 
@@ -80,7 +130,7 @@ echo "============================================"
 # twenty-four GPU-hours training on a hole.
 echo ""
 echo "########## MAPPING REPORT — what survives, and what does not ##########"
-python data/prepare_taxonomy.py --src "$SRC" --report-only --max-dropped 0.05
+python data/prepare_taxonomy.py --src $SRCS --report-only --max-dropped 0.05
 REPORT_STATUS=$?
 if [ $REPORT_STATUS -ne 0 ]; then
     echo ""
@@ -94,7 +144,7 @@ for LEVEL in fine semantic decision; do
     echo ""
     echo "########## $LEVEL ##########"
     python data/prepare_taxonomy.py \
-        --src "$SRC" \
+        --src $SRCS \
         --level "$LEVEL" \
         --out "data/gran_$LEVEL" || exit 1
 done

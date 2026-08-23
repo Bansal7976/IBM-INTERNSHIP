@@ -67,21 +67,47 @@ def _norm(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().lower())
 
 
-def convert_split(coco_json_path: Path, images_root: Path, out_dir: Path
-                  ) -> dict:
-    with open(coco_json_path) as f:
-        coco = json.load(f)
+def build_category_map(coco: dict, keep_source_names: bool):
+    """(coco category id -> output class id, output class names).
 
-    id_to_unified = {}
-    unmapped = []
+    Two modes:
+
+      unified (default)   collapse onto the project's shared 15-class taxonomy,
+                          so UVH-26 can be merged with IDD and DriveIndia.
+
+      keep_source_names   preserve UVH-26's own body-type classes -- Hatchback,
+                          Sedan, SUV and MUV stay distinct rather than becoming
+                          one "car".
+
+    The second mode exists for the granularity experiment. Collapsing first and
+    then measuring what collapsing costs would be circular: the merged taxonomy
+    has already discarded exactly the distinctions under test. UVH-26 is the
+    right source for the fine-grained arm precisely because it separates body
+    types that the decision layer treats identically.
+    """
+    if keep_source_names:
+        names = sorted({cat["name"] for cat in coco["categories"]})
+        index = {n: i for i, n in enumerate(names)}
+        return {cat["id"]: index[cat["name"]] for cat in coco["categories"]}, names
+
+    id_map, unmapped = {}, []
     for cat in coco["categories"]:
         mapped = NAME_TO_UNIFIED.get(_norm(cat["name"]))
         if mapped is not None:
-            id_to_unified[cat["id"]] = mapped
+            id_map[cat["id"]] = mapped
         else:
             unmapped.append(cat["name"])
     if unmapped:
         print(f"[prepare_uvh26] Unmapped categories (skipped): {unmapped}")
+    return id_map, None
+
+
+def convert_split(coco_json_path: Path, images_root: Path, out_dir: Path,
+                  keep_source_names: bool = False) -> dict:
+    with open(coco_json_path) as f:
+        coco = json.load(f)
+
+    id_to_unified, source_names = build_category_map(coco, keep_source_names)
 
     images_by_id = {img["id"]: img for img in coco["images"]}
     anns_by_image: dict[int, list] = {}
@@ -132,6 +158,7 @@ def convert_split(coco_json_path: Path, images_root: Path, out_dir: Path
         (out_labels / f"{stem}.txt").write_text("\n".join(lines))
         stats["frames"] += 1
 
+    stats["names"] = source_names
     return stats
 
 
@@ -142,6 +169,11 @@ def main():
     ap.add_argument("--annotation_version", choices=["MV", "ST"], default="MV",
                     help="MV=majority voting (default, simpler), "
                          "ST=STAPLE probabilistic consensus")
+    ap.add_argument("--keep-source-names", action="store_true",
+                    help="keep UVH-26's own body-type classes (Hatchback, "
+                         "Sedan, SUV, MUV separate) instead of collapsing onto "
+                         "the project's 15-class taxonomy. Use this to build "
+                         "the fine-grained arm of the granularity experiment.")
     args = ap.parse_args()
 
     root, out = Path(args.data_root), Path(args.out)
@@ -157,16 +189,40 @@ def main():
          root / "UVH-26-Val" / "images"),
     ]
 
+    names = None
     for split, json_path, images_root in splits:
         if not json_path.exists():
             print(f"[skip] {json_path} not found")
             continue
-        stats = convert_split(json_path, images_root, out / split)
+        stats = convert_split(json_path, images_root, out / split,
+                              args.keep_source_names)
         print(f"\n{split}: {stats['frames']} frames, {stats['boxes']} boxes, "
               f"{stats['skipped_boxes']} boxes skipped")
+        names = stats.get("names") or names
 
-    print("\nMerge into the unified dataset with: python data/prepare_merged.py "
-          f"(add --uvh26 {out})")
+    if args.keep_source_names:
+        if not names:
+            raise SystemExit("no split converted, so there is no class list to write")
+        body = "\n".join(f"  {i}: {n}" for i, n in enumerate(names))
+        (out / "uvh26_native.yaml").write_text(
+            "# UVH-26 with its OWN body-type classes preserved.\n"
+            "# Built for the granularity experiment: collapsing the labels first\n"
+            "# and then measuring what collapsing costs would be circular, since\n"
+            "# the merged taxonomy has already discarded the distinctions under\n"
+            "# test. See data/prepare_taxonomy.py and SIH_2026_PLAN.md Part 2.\n"
+            f"path: {out.resolve()}\n"
+            f"train: train/images\nval: val/images\nnames:\n{body}\n",
+            encoding="utf-8")
+        print(f"\n{len(names)} native classes: {names}")
+        print(f"wrote {out / 'uvh26_native.yaml'}")
+        print("\nNext, build the three granularities from it:")
+        print("  for L in fine semantic decision; do")
+        print(f"    python data/prepare_taxonomy.py --src {out} "
+              "--level $L --out data/gran_$L")
+        print("  done")
+    else:
+        print("\nMerge into the unified dataset with: python data/prepare_merged.py "
+              f"(add --uvh26 {out})")
 
 
 if __name__ == "__main__":
