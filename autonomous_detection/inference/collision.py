@@ -49,6 +49,44 @@ class CollisionDetector:
     dist_history: dict = field(default_factory=dict)
     last_depth: Optional[np.ndarray] = None
 
+    # Telemetry. TTC needs `history_len >= 5` samples of a track's distance
+    # before it can report a closing speed, and that history is keyed on
+    # track_id -- so every tracker ID switch throws it away and blinds this
+    # module on that object for the next five frames.
+    #
+    # In dense unstructured traffic, where two-wheelers weave and occlude each
+    # other constantly, that can happen often enough to matter, and it would be
+    # invisible: the module simply raises no alert. These counters make it
+    # measurable, so a decision to change tracker parameters rests on a number
+    # rather than a hunch. Read them with stats().
+    stats_frames: int = 0
+    stats_track_observations: int = 0     # (track, frame) pairs seen
+    stats_with_closing_speed: int = 0     # ... of which had enough history
+    stats_new_tracks: int = 0             # first sighting of an id
+    stats_lost_tracks: int = 0            # ids that disappeared
+    stats_no_depth: int = 0               # distance unresolvable
+    stats_rescued: int = 0                # histories recovered across an ID switch
+
+    # Recovering a distance history across a tracker ID switch.
+    #
+    # Measured on a synthetic approach: with stable ids, closing speed is
+    # available for 93% of sightings. At an ID switch every 5 frames that falls
+    # to 20%, and every 3 frames to ZERO -- the collision layer goes completely
+    # silent, and silently, because "no alert" is indistinguishable from "road
+    # clear". Dense unstructured traffic, where two-wheelers weave and occlude
+    # each other constantly, is exactly where that churn happens.
+    #
+    # So when an unseen track_id appears where a track vanished moments ago and
+    # the boxes overlap, its distance history is inherited rather than
+    # restarted. This is deliberately geometric and not appearance-based: it
+    # costs nothing, needs no ReID model, and the failure mode of a wrong match
+    # is a slightly stale distance sample rather than a fabricated object.
+    rescue_across_id_switch: bool = True
+    rescue_iou_threshold: float = 0.5
+    rescue_max_age_frames: int = 5
+    _lost: dict = field(default_factory=dict, repr=False)   # tid -> (bbox, frame, hist)
+    _last_bbox: dict = field(default_factory=dict, repr=False)
+
     def set_night_mode(self, is_dark_unlit: bool):
         """Longer safety margins when driving in unlit darkness."""
         self.critical_ttc = 2.5 if is_dark_unlit else 1.5
@@ -86,13 +124,27 @@ class CollisionDetector:
     def update(self, frame: np.ndarray, tracks: list, lanes=None) -> list[Alert]:
         self.last_depth = self.depth_model.infer(frame)
         alerts = []
-        active_ids = set()
+        self.stats_frames += 1
+        active_ids = {t.track_id for t in tracks}
+
+        # Retire vanished tracks BEFORE processing this frame's tracks, not
+        # after. At an ID switch the old id disappears and the new one appears
+        # in the SAME frame, so retiring afterwards leaves nothing for the new
+        # track to inherit and the rescue only ever catches a history one
+        # generation stale. Ordering it this way is what makes the recovery
+        # exact rather than accidental.
+        self._retire_missing(active_ids)
 
         for t in tracks:
-            active_ids.add(t.track_id)
+            self.stats_track_observations += 1
+            if t.track_id not in self.dist_history:
+                self.stats_new_tracks += 1
+                self._try_rescue_history(t)
+            self._last_bbox[t.track_id] = tuple(t.bbox)
 
             dist = self._object_distance(t.bbox)
             if dist is None:
+                self.stats_no_depth += 1
                 continue
 
             # BUG FIX: distance history (and therefore depth_speed_mps) used to
@@ -115,6 +167,7 @@ class CollisionDetector:
                 closing = (hist[0] - hist[-1]) / elapsed  # m/s, + = approaching
                 # Exposed for overtaking.py's oncoming/lead-vehicle speed rules.
                 t.depth_speed_mps = closing
+                self.stats_with_closing_speed += 1
 
             # BUG FIX: this used to be `if lanes is not None and not
             # self._in_ego_path(...)`, which short-circuited BEFORE ever
@@ -137,12 +190,92 @@ class CollisionDetector:
                 elif ttc < warning:
                     alerts.append(Alert("WARNING", t.track_id, cls_name, dist, ttc, tuple(t.bbox)))
 
-        # Drop history of vanished tracks
-        for tid in list(self.dist_history):
-            if tid not in active_ids:
-                del self.dist_history[tid]
-
         return alerts
+
+    def _retire_missing(self, active_ids: set) -> None:
+        """Park the histories of tracks that are no longer present.
+
+        Parked rather than discarded, so a track that reappears under a new id
+        can inherit its distance history instead of starting from nothing.
+        """
+        for tid in list(self.dist_history):
+            if tid in active_ids:
+                continue
+            if self.rescue_across_id_switch and tid in self._last_bbox:
+                self._lost[tid] = (self._last_bbox[tid], self.stats_frames,
+                                   self.dist_history[tid])
+            del self.dist_history[tid]
+            self._last_bbox.pop(tid, None)
+            self.stats_lost_tracks += 1
+
+        # Expire parked histories nothing claimed. A stale distance is worse
+        # than none: it would report a closing speed measured against where the
+        # object was several frames ago.
+        for tid, (_, seen_at, _) in list(self._lost.items()):
+            if self.stats_frames - seen_at > self.rescue_max_age_frames:
+                del self._lost[tid]
+
+    @staticmethod
+    def _iou(a, b) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        inter = max(ix2 - ix1, 0) * max(iy2 - iy1, 0)
+        area_a = max(ax2 - ax1, 0) * max(ay2 - ay1, 0)
+        area_b = max(bx2 - bx1, 0) * max(by2 - by1, 0)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
+
+    def _try_rescue_history(self, track) -> bool:
+        """Inherit a just-lost track's distance history if the boxes overlap.
+
+        Without this, a tracker ID switch resets the history and the module
+        cannot report a closing speed for the next several frames -- during
+        which it raises no alert at all, whatever is actually approaching.
+        """
+        if not self.rescue_across_id_switch or not self._lost:
+            return False
+        bbox = tuple(track.bbox)
+        best_tid, best_iou = None, 0.0
+        for tid, (last_bbox, seen_at, _hist) in self._lost.items():
+            if self.stats_frames - seen_at > self.rescue_max_age_frames:
+                continue
+            iou = self._iou(bbox, last_bbox)
+            if iou > best_iou:
+                best_tid, best_iou = tid, iou
+        if best_tid is None or best_iou < self.rescue_iou_threshold:
+            return False
+        self.dist_history[track.track_id] = self._lost.pop(best_tid)[2]
+        self.stats_rescued += 1
+        return True
+
+    def stats(self) -> dict:
+        """How often TTC was actually computable, and why it was not.
+
+        `closing_speed_coverage` is the number that matters. It is the fraction
+        of object sightings for which a closing speed -- and therefore a TTC --
+        was available. Anything well below 1.0 means the collision layer is
+        frequently silent not because the road is clear but because it could
+        not measure, and the usual cause is tracker ID churn discarding the
+        distance history.
+
+        `tracks_per_100_frames` is the companion figure: a high rate of new ids
+        relative to the objects actually present is what ID churn looks like.
+        """
+        obs = max(self.stats_track_observations, 1)
+        return {
+            "frames": self.stats_frames,
+            "track_observations": self.stats_track_observations,
+            "closing_speed_coverage": round(self.stats_with_closing_speed / obs, 4),
+            "new_tracks": self.stats_new_tracks,
+            "lost_tracks": self.stats_lost_tracks,
+            "tracks_per_100_frames": round(
+                self.stats_new_tracks / max(self.stats_frames, 1) * 100, 2),
+            "histories_rescued": self.stats_rescued,
+            "depth_unresolvable": self.stats_no_depth,
+            "history_len_required": self.history_len,
+        }
 
     def _object_distance(self, bbox) -> Optional[float]:
         """Median depth over the LOWER HALF of the bbox.

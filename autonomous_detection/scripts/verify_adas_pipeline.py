@@ -144,6 +144,115 @@ def test_collision():
 # 3. IPM: straight lane -> large radius, curved lane -> small radius
 # --------------------------------------------------------------------------
 
+def test_id_churn_resilience():
+    """Collision detection must survive tracker ID switches.
+
+    TTC needs several frames of a track's distance history before it can report
+    a closing speed, and that history is keyed on track_id. So every ID switch
+    throws it away -- and the module then raises no alert at all, which is
+    indistinguishable from "the road is clear". Dense unstructured traffic,
+    where two-wheelers weave and occlude each other constantly, is exactly
+    where that churn happens.
+
+    Measured below: without recovery, an ID switch every three frames drops
+    closing-speed coverage to ZERO.
+    """
+    from inference.collision import CollisionDetector
+
+    class RampDepth:
+        """A scene approaching at a steady rate."""
+        def __init__(self):
+            self.d = 60.0
+
+        def infer(self, frame):
+            self.d -= 0.5
+            return np.full(frame.shape[:2], self.d, dtype=np.float32)
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def coverage(switch_every: int, rescue: bool) -> dict:
+        det = CollisionDetector(RampDepth(), fps=30,
+                                rescue_across_id_switch=rescue)
+        for i in range(60):
+            tid = 1 if switch_every == 0 else 1 + i // switch_every
+            x = 280 + i // 6          # drifts as an approaching vehicle would
+            t = FakeDet((x, 200, x + 80, 400), 0.9, 0, "car")
+            t.track_id = tid
+            t.depth_speed_mps = 0.0
+            det.update(frame, [t])
+        return det.stats()
+
+    stable = coverage(0, False)["closing_speed_coverage"]
+    check("id-churn: with stable ids, closing speed is available for most "
+          "sightings (the ceiling this mechanism aims at)",
+          stable > 0.85, f"{stable}")
+
+    dense_off = coverage(3, False)["closing_speed_coverage"]
+    check("id-churn: WITHOUT recovery, an ID switch every 3 frames drops "
+          "coverage to zero -- the collision layer goes silent, and silently",
+          dense_off == 0.0, f"{dense_off}")
+
+    dense_on = coverage(3, True)
+    check("id-churn: WITH recovery, the same churn keeps coverage at the "
+          "stable-tracker level",
+          dense_on["closing_speed_coverage"] >= stable - 0.01,
+          f"{dense_on['closing_speed_coverage']} vs stable {stable}")
+    check("id-churn: and it reports how many histories it had to rescue, so "
+          "tracker quality stays visible rather than papered over",
+          dense_on["histories_rescued"] > 10, str(dense_on))
+
+    worst = coverage(1, True)["closing_speed_coverage"]
+    check("id-churn: coverage holds even when the id changes EVERY frame",
+          worst >= stable - 0.01, f"{worst}")
+
+    for every in (5, 10, 20):
+        off = coverage(every, False)["closing_speed_coverage"]
+        on = coverage(every, True)["closing_speed_coverage"]
+        check(f"id-churn: recovery improves coverage at a switch every "
+              f"{every} frames ({off:.2f} -> {on:.2f})", on > off,
+              f"{off} -> {on}")
+
+    # The recovery must not invent continuity between DIFFERENT objects.
+    det = CollisionDetector(RampDepth(), fps=30)
+    left = FakeDet((50, 200, 130, 400), 0.9, 0, "car")
+    left.track_id = 1
+    left.depth_speed_mps = 0.0
+    for _ in range(8):
+        det.update(frame, [left])
+    before = det.stats()["histories_rescued"]
+
+    far_away = FakeDet((500, 200, 580, 400), 0.9, 0, "car")   # no overlap at all
+    far_away.track_id = 2
+    far_away.depth_speed_mps = 0.0
+    det.update(frame, [far_away])
+    check("id-churn: a genuinely different object elsewhere in the frame does "
+          "NOT inherit the vanished track's history",
+          det.stats()["histories_rescued"] == before,
+          f"rescued {det.stats()['histories_rescued']} (was {before})")
+
+    # A history parked too long is worse than none: it would measure closing
+    # speed against where the object was many frames ago.
+    det2 = CollisionDetector(RampDepth(), fps=30, rescue_max_age_frames=2)
+    a = FakeDet((280, 200, 360, 400), 0.9, 0, "car")
+    a.track_id = 1
+    a.depth_speed_mps = 0.0
+    for _ in range(8):
+        det2.update(frame, [a])
+    for _ in range(5):                       # object absent for 5 frames
+        det2.update(frame, [])
+    b = FakeDet((280, 200, 360, 400), 0.9, 0, "car")
+    b.track_id = 2
+    b.depth_speed_mps = 0.0
+    det2.update(frame, [b])
+    check("id-churn: a history parked longer than rescue_max_age_frames is "
+          "expired rather than reused stale",
+          det2.stats()["histories_rescued"] == 0,
+          str(det2.stats()))
+
+    check("id-churn: the mechanism can be switched off entirely",
+          coverage(3, False)["closing_speed_coverage"] == 0.0)
+
+
 def test_group_scaled_margins():
     """The decision taxonomy must actually change what the system does.
 
@@ -1269,6 +1378,7 @@ def main():
     for name, fn in [
         ("Tracker", test_tracker),
         ("Collision / TTC", test_collision),
+        ("Collision survives tracker ID churn", test_id_churn_resilience),
         ("Decision-group scaled collision margins",
          test_group_scaled_margins),
         ("IPM ground-plane curvature", test_ipm),
