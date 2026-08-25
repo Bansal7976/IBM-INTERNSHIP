@@ -1491,6 +1491,166 @@ def test_multi_source_granularity():
               f"{sum(expected_frames.values())}")
 
 
+def test_indian_dataset_ingestion():
+    """Any of the named Indian datasets must convert with one command.
+
+    The problem statement points at IDD plus "Mendeley traffic data", and the
+    Mendeley candidates ship in three different formats -- VOC XML, YOLO text
+    and COCO JSON. One converter handles all three, and the property that
+    matters most is not that it parses them but that it says loudly which class
+    names the taxonomy does NOT recognise: an unrecognised name is data about
+    to be discarded silently.
+    """
+    import json
+    import subprocess
+    import tempfile
+    import xml.etree.ElementTree as ET
+
+    try:
+        from PIL import Image
+    except ImportError:
+        check("ingestion: Pillow available for the format round-trip", False,
+              "pip install pillow")
+        return
+
+    from data.prepare_indian import detect_format
+    from models.taxonomy import EXCLUDED_CLASSES, DecisionTaxonomy, normalise
+
+    # Names drawn from the actual Mendeley Indian datasets, plus one the
+    # taxonomy has never heard of and one it excludes on purpose.
+    NAMES = ["car", "bike", "rickshaw", "bullock cart", "cow",
+             "signboard", "jugaad"]
+
+    def build(root: Path, fmt: str, n_img: int = 6):
+        def img(p):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (640, 480), (128, 128, 128)).save(p)
+
+        if fmt == "voc":
+            for k in range(n_img):
+                img(root / "JPEGImages" / f"{k:03d}.jpg")
+                ann = ET.Element("annotation")
+                sz = ET.SubElement(ann, "size")
+                ET.SubElement(sz, "width").text = "640"
+                ET.SubElement(sz, "height").text = "480"
+                for j, n in enumerate(NAMES):
+                    o = ET.SubElement(ann, "object")
+                    ET.SubElement(o, "name").text = n
+                    bb = ET.SubElement(o, "bndbox")
+                    for t, v in (("xmin", 40 + j * 30), ("ymin", 100),
+                                 ("xmax", 100 + j * 30), ("ymax", 300)):
+                        ET.SubElement(bb, t).text = str(v)
+                d = root / "Annotations"
+                d.mkdir(parents=True, exist_ok=True)
+                ET.ElementTree(ann).write(d / f"{k:03d}.xml")
+
+        elif fmt == "yolo":
+            for k in range(n_img):
+                img(root / "images" / f"{k:03d}.jpg")
+                d = root / "labels"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / f"{k:03d}.txt").write_text(
+                    "\n".join(f"{j} 0.5 0.5 0.2 0.3" for j in range(len(NAMES))))
+            (root / "classes.txt").write_text("\n".join(NAMES))
+
+        else:  # coco
+            imgs, anns = [], []
+            for k in range(n_img):
+                img(root / "images" / f"{k:03d}.jpg")
+                imgs.append({"id": k, "file_name": f"{k:03d}.jpg",
+                             "width": 640, "height": 480})
+                for j in range(len(NAMES)):
+                    anns.append({"id": len(anns), "image_id": k,
+                                 "category_id": j,
+                                 "bbox": [40 + j * 30, 100, 60, 200]})
+            (root / "ann.json").write_text(json.dumps({
+                "images": imgs, "annotations": anns,
+                "categories": [{"id": i, "name": n}
+                               for i, n in enumerate(NAMES)]}))
+
+    script = PROJECT_ROOT / "data" / "prepare_indian.py"
+    results = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        for fmt in ("voc", "yolo", "coco"):
+            src = tmp / fmt
+            src.mkdir(parents=True)
+            build(src, fmt)
+
+            check(f"ingestion [{fmt}]: the format is detected from the files "
+                  f"on disk, not from a flag",
+                  detect_format(src) == fmt, f"detected {detect_format(src)!r}")
+
+            r = subprocess.run(
+                [sys.executable, str(script), "--src", str(src),
+                 "--out", str(tmp / f"{fmt}_out"), "--copy"],
+                capture_output=True, text=True, cwd=str(PROJECT_ROOT), timeout=300)
+            results[fmt] = r
+            check(f"ingestion [{fmt}]: converts without error",
+                  r.returncode == 0, r.stderr.strip()[-300:])
+            if r.returncode != 0:
+                continue
+
+            out = tmp / f"{fmt}_out"
+            check(f"ingestion [{fmt}]: emits a dataset config with the SOURCE "
+                  f"class names preserved (the granularity experiment needs "
+                  f"to know which original class each box came from)",
+                  (out / "data.yaml").exists()
+                  and "rickshaw" in (out / "data.yaml").read_text(encoding="utf-8"))
+
+            boxes = sum(
+                len(f.read_text(encoding="utf-8").strip().splitlines())
+                for split in ("train", "val")
+                for f in (out / split / "labels").glob("*.txt"))
+            check(f"ingestion [{fmt}]: every annotation survives the round trip",
+                  boxes == 6 * len(NAMES), f"{boxes} of {6 * len(NAMES)}")
+
+            # A converted dataset must feed straight into the granularity tool.
+            rep = subprocess.run(
+                [sys.executable, str(PROJECT_ROOT / "data" / "prepare_taxonomy.py"),
+                 "--src", str(out), "--report-only"],
+                capture_output=True, text=True, cwd=str(PROJECT_ROOT), timeout=300)
+            check(f"ingestion [{fmt}]: the output feeds prepare_taxonomy.py "
+                  f"directly",
+                  "UNRECOGNISED" in rep.stdout,
+                  rep.stderr.strip()[-200:] or rep.stdout[-200:])
+
+    # The reporting distinction is the point of the whole script.
+    out = results["voc"].stdout
+    check("ingestion: an unrecognised class name is flagged as data about to "
+          "be discarded, not passed over in silence",
+          "UNRECOGNISED" in out and "jugaad" in out, out[-300:])
+    check("ingestion: a deliberately excluded class is reported as a decision, "
+          "not as a gap",
+          "excluded by design" in out, out[-300:])
+    check("ingestion: the two are distinguished, so a real hole in the mapping "
+          "is not lost among things we meant to drop",
+          out.count("UNRECOGNISED") >= 1 and "excluded by design" in out)
+
+    # Vocabulary coverage for the datasets the problem statement names.
+    tx = DecisionTaxonomy()
+    indian_vocab = [
+        "autorickshaw", "rickshaw", "e-rickshaw", "toto", "cycle rickshaw",
+        "bike", "scooty", "motorbike", "bullock cart", "animal drawn cart",
+        "cow", "buffalo", "goat", "elephant", "pillion", "hawker", "vendor",
+        "tempo traveller", "mini truck", "pickup", "trolley", "jcb",
+        "water tanker", "tractor", "pushcart", "vehicle fallback",
+    ]
+    unmapped = [n for n in indian_vocab
+                if tx.map_name(n) is None and normalise(n) not in EXCLUDED_CLASSES]
+    check("ingestion: the taxonomy covers the vocabulary of IDD and the "
+          "Mendeley Indian datasets",
+          not unmapped, f"unmapped: {unmapped}")
+
+    check("ingestion: an animal-drawn cart is VULNERABLE — the hazard is the "
+          "animal that can bolt, not the cart",
+          tx.map_name("bullock cart") == "VULNERABLE",
+          str(tx.map_name("bullock cart")))
+    check("ingestion: a speed breaker is excluded, not treated as an obstacle "
+          "to steer around (it is driven over)",
+          normalise("speed breaker") in EXCLUDED_CLASSES)
+
+
 def test_swmc_and_granularity():
     """SWMC scoring, and the experiment-validity guarantees around it.
 
@@ -1760,6 +1920,8 @@ def main():
         ("Decision taxonomy + safety-weighted cost", test_taxonomy),
         ("Multi-source granularity build (IDD + UVH-26 union)",
          test_multi_source_granularity),
+        ("Indian dataset ingestion (IDD / Mendeley formats)",
+         test_indian_dataset_ingestion),
         ("SWMC metric + granularity experiment validity",
          test_swmc_and_granularity),
         ("CLRNet coordinate-scaling regression", test_clrnet_coord_scaling),

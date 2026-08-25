@@ -127,6 +127,37 @@ NAME_TO_GROUP = {
     "cone": "STATIC_OBSTACLE", "debris": "STATIC_OBSTACLE",
     "obstacle": "STATIC_OBSTACLE",
 
+    # --- vocabulary of the Mendeley Indian traffic datasets ---
+    # DATS_2022, HeteroTraffic, IndiaScene365 and Indistreet2K25 use local
+    # names that no Western dataset contains. Two judgment calls are recorded
+    # here rather than left implicit:
+    #
+    # ANIMAL-DRAWN CARTS are VULNERABLE, not STATIC_OBSTACLE or THREE_WHEELER.
+    # The defining hazard is not the cart but the animal pulling it, which can
+    # bolt sideways without warning -- the VULNERABLE signature exactly. Our own
+    # cost function settles the tie: over-caution costs 0.10, under-caution up
+    # to 1.0, so the more cautious grouping is the cheaper error.
+    #
+    # SPEED BREAKERS and SIGNBOARDS are excluded, not grouped. A speed breaker
+    # is driven OVER, not around, so it must not narrow the corridor; it belongs
+    # to speed control, which this taxonomy does not cover.
+    "bike": "TWO_WHEELER", "scooty": "TWO_WHEELER", "moped": "TWO_WHEELER",
+    "pillion": "VULNERABLE", "hawker": "VULNERABLE", "vendor": "VULNERABLE",
+    "goat": "VULNERABLE", "elephant": "VULNERABLE", "camel": "VULNERABLE",
+    "horse": "VULNERABLE", "pig": "VULNERABLE", "monkey": "VULNERABLE",
+    "bullock cart": "VULNERABLE", "animal drawn cart": "VULNERABLE",
+    "animal cart": "VULNERABLE", "horse cart": "VULNERABLE",
+    "rickshaw": "THREE_WHEELER", "e rickshaw": "THREE_WHEELER",
+    "erickshaw": "THREE_WHEELER", "toto": "THREE_WHEELER",
+    "cycle rickshaw": "THREE_WHEELER",
+    "pickup": "LIGHT_VEHICLE",
+    "mini truck": "HEAVY_VEHICLE", "minitruck": "HEAVY_VEHICLE",
+    "trolley": "HEAVY_VEHICLE", "tractor trolley": "HEAVY_VEHICLE",
+    "jcb": "HEAVY_VEHICLE", "bulldozer": "HEAVY_VEHICLE",
+    "crane": "HEAVY_VEHICLE", "dumper": "HEAVY_VEHICLE",
+    "pole": "STATIC_OBSTACLE", "divider": "STATIC_OBSTACLE",
+    "median": "STATIC_OBSTACLE", "roadblock": "STATIC_OBSTACLE",
+
     # --- IDD's open-world catch-all ---
     # "vehicle fallback" is a MIXED bucket: IDD puts tractors, water tankers
     # and excavators in it, and this project's converters additionally route
@@ -151,6 +182,8 @@ NAME_TO_GROUP = {
 EXCLUDED_CLASSES = {
     "traffic light", "trafficlight", "traffic sign", "trafficsign",
     "misc", "miscellaneous", "other", "unknown", "background",
+    "signboard", "sign board", "billboard", "hoarding",
+    "speed breaker", "speedbreaker", "speed bump", "pothole",
 }
 
 # A comparable grouping organised by APPEARANCE rather than decision
@@ -187,6 +220,22 @@ IDD_LEVEL3_GROUPS = {
     "barrier": "obstacle", "traffic cone": "obstacle", "cone": "obstacle",
     "debris": "obstacle", "obstacle": "obstacle",
     "vehicle fallback": "vehicle fallback",
+    "bike": "motorcycle", "scooty": "motorcycle", "moped": "motorcycle",
+    "pillion": "person", "hawker": "person", "vendor": "person",
+    "goat": "animal", "elephant": "animal", "camel": "animal",
+    "horse": "animal", "pig": "animal", "monkey": "animal",
+    "bullock cart": "cart", "animal drawn cart": "cart",
+    "animal cart": "cart", "horse cart": "cart",
+    "rickshaw": "autorickshaw", "e rickshaw": "autorickshaw",
+    "erickshaw": "autorickshaw", "toto": "autorickshaw",
+    "cycle rickshaw": "autorickshaw",
+    "pickup": "car",
+    "mini truck": "truck", "minitruck": "truck",
+    "trolley": "vehicle fallback", "tractor trolley": "vehicle fallback",
+    "jcb": "vehicle fallback", "bulldozer": "vehicle fallback",
+    "crane": "vehicle fallback", "dumper": "vehicle fallback",
+    "pole": "obstacle", "divider": "obstacle",
+    "median": "obstacle", "roadblock": "obstacle",
     "train": "train", "tram": "train",
 }
 
