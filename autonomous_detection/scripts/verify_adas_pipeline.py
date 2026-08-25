@@ -354,6 +354,238 @@ def test_ipm():
 #    trained and have nothing to fit a curve to there).
 # --------------------------------------------------------------------------
 
+def test_planning():
+    """Reference path, corridor and Frenet planning.
+
+    Three defects are pinned here, all found by testing against known geometry
+    and all wrong in the unsafe direction:
+
+      * a corridor clipped by the edge of the observed area produced a
+        centreline that bent back INTO the grid -- steering the vehicle off a
+        road that was actually leaving the field of view;
+      * an obstacle shorter than the station spacing constrained NOTHING,
+        so a pedestrian could be invisible to the corridor builder;
+      * only static objects produced hard bounds, so a traffic cone diverted
+        the vehicle while a pedestrian did not.
+    """
+    from planning.corridor import Obstacle, build_corridor
+    from planning.frenet import FrenetPlanner, PlannerConfig, quartic, quintic
+    from planning.reference_path import (GroundGrid,
+                                         reference_path_from_free_space)
+
+    RES = 0.2
+
+    def road(centre_fn, half_width_fn, n_fwd=250, n_lat=200):
+        g = np.zeros((n_fwd, n_lat), dtype=bool)
+        for r in range(n_fwd):
+            f = r * RES
+            c = n_lat // 2 + centre_fn(f) / RES
+            hw = half_width_fn(f) / RES
+            lo, hi = int(round(c - hw)), int(round(c + hw))
+            g[r, max(0, lo):min(n_lat, hi)] = True
+        return GroundGrid(g, resolution_m=RES, ego_row=0, ego_col=n_lat // 2)
+
+    straight = road(lambda f: 0.0, lambda f: 4.0)
+    path = reference_path_from_free_space(straight)
+
+    # -- reference path ----------------------------------------------------
+    check("planner: a straight corridor yields a straight reference path",
+          path is not None and np.abs(path.x).max() < 0.3,
+          f"max lateral {np.abs(path.x).max():.2f} m" if path else "no path")
+    check("planner: the reference sits at the centre of the drivable width",
+          abs(path.half_width.mean() - 4.0) < 0.2, f"{path.half_width.mean():.2f}")
+
+    def arc(R):
+        return road(lambda f: R - np.sqrt(max(R * R - f * f, 0.0)) if f < R else R,
+                    lambda f: 3.0, n_lat=400)
+
+    radii = {}
+    for R in (50, 100, 150, 400):
+        p = reference_path_from_free_space(arc(float(R)))
+        radii[R] = p.min_radius_m() if p else None
+    check("planner: curved corridors recover their true radius within 10%",
+          all(v is not None and abs(v - R) / R < 0.10 for R, v in radii.items()),
+          str({R: f"{v:.0f}" for R, v in radii.items() if v}))
+    check("planner: recovered radius never OVER-reports (a road read straighter "
+          "than it is invites a manoeuvre the geometry does not support)",
+          all(v <= R * 1.05 for R, v in radii.items() if v),
+          str({R: f"{v:.0f}" for R, v in radii.items() if v}))
+
+    # A road leaving the field of view must truncate, not bend back inward.
+    narrow_view = road(lambda f: (100.0 - np.sqrt(max(10000.0 - f * f, 0.0))
+                                  if f < 100 else 100.0),
+                       lambda f: 3.0, n_lat=100)
+    p_edge = reference_path_from_free_space(narrow_view)
+    check("planner: a road running out of the observed area truncates the path "
+          "rather than curving it back inside",
+          p_edge is not None and "field of view" in p_edge.truncated_reason,
+          p_edge.truncated_reason if p_edge else "no path")
+
+    ends = road(lambda f: 0.0, lambda f: 4.0 if f < 20.0 else 0.0)
+    p_end = reference_path_from_free_space(ends)
+    check("planner: the path stops where the road stops, and says so",
+          p_end is not None and 19.0 < p_end.observed_length_m < 21.0
+          and p_end.truncated_reason != "",
+          f"{p_end.observed_length_m:.1f} m — {p_end.truncated_reason}" if p_end else "none")
+
+    # -- Frenet projection -------------------------------------------------
+    s, d = path.to_frenet([0.0, 2.0, -2.0], [20.0, 20.0, 20.0])
+    check("planner: Frenet projection puts an on-path point at d = 0",
+          abs(d[0]) < 0.3, f"{d[0]:.2f}")
+    check("planner: d is positive to the right of travel, negative to the left",
+          d[1] > 1.5 and d[2] < -1.5, f"right {d[1]:.2f}, left {d[2]:.2f}")
+    check("planner: s tracks forward distance along the path",
+          abs(s[0] - 20.0) < 1.0, f"{s[0]:.2f}")
+
+    # -- corridor: the taxonomy must set the berth -------------------------
+    def width_beside(group, x=1.5, y=20.0, **kw):
+        ob = Obstacle(x=x, y=y, half_width=0.3, half_length=0.3,
+                      group=group, track_id=1, **kw)
+        c = build_corridor(path, [ob])
+        return c, c.width()[np.argmin(np.abs(c.s - y))]
+
+    widths = {g: width_beside(g)[1] for g in
+              ("STATIC_OBSTACLE", "LIGHT_VEHICLE", "HEAVY_VEHICLE",
+               "TWO_WHEELER", "VULNERABLE")}
+    check("planner: a pedestrian narrows the corridor MORE than a traffic cone "
+          "does, because the taxonomy says so",
+          widths["VULNERABLE"] < widths["STATIC_OBSTACLE"],
+          str({k: round(v, 2) for k, v in widths.items()}))
+    check("planner: corridor width falls monotonically with the group's "
+          "lateral clearance",
+          widths["STATIC_OBSTACLE"] >= widths["HEAVY_VEHICLE"]
+          >= widths["TWO_WHEELER"] >= widths["VULNERABLE"],
+          str({k: round(v, 2) for k, v in widths.items()}))
+
+    clear_width = build_corridor(path, []).width().mean()
+    check("planner: EVERY group narrows the corridor — a mover must produce a "
+          "hard bound too, or the plan drives through a standing pedestrian",
+          all(w < clear_width - 0.1 for w in widths.values()),
+          f"clear {clear_width:.2f} vs {({k: round(v,2) for k,v in widths.items()})}")
+
+    # An obstacle shorter than the station spacing must never slip between them.
+    missed = 0
+    for y in np.arange(10.0, 35.0, 0.17):
+        c = build_corridor(path, [Obstacle(x=0.0, y=float(y), half_width=0.25,
+                                           half_length=0.25, group="VULNERABLE",
+                                           track_id=9)])
+        if c.width()[np.argmin(np.abs(c.s - y))] >= clear_width - 0.05:
+            missed += 1
+    check("planner: a small obstacle is never missed between corridor stations",
+          missed == 0, f"{missed} of {len(np.arange(10.0, 35.0, 0.17))} missed")
+
+    # Predicted motion is a forecast: it should raise cost, not forbid.
+    c_still, w_still = width_beside("VULNERABLE", x=3.0, y=25.0)
+    c_step, w_step = width_beside("VULNERABLE", x=3.0, y=25.0, vx=-1.0)
+    i = np.argmin(np.abs(c_step.s - 25.0))
+    check("planner: a pedestrian stepping into the road narrows the SOFT "
+          "corridor (predicted motion is a forecast, not an observation)",
+          c_step.soft_width()[i] < c_still.soft_width()[i] - 0.5,
+          f"still {c_still.soft_width()[i]:.2f} -> stepping {c_step.soft_width()[i]:.2f}")
+    check("planner: but the hard corridor is unchanged, so a crowded street "
+          "stays plannable instead of becoming infeasible",
+          abs(w_step - w_still) < 0.01, f"{w_still:.2f} vs {w_step:.2f}")
+    check("planner: soft bounds are never laxer than hard ones",
+          np.all(c_step.soft_min >= c_step.d_min - 1e-9)
+          and np.all(c_step.soft_max <= c_step.d_max + 1e-9))
+
+    # -- polynomials -------------------------------------------------------
+    from planning.frenet import poly_eval
+    c5 = quintic(0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 4.0)
+    check("planner: the quintic meets its boundary conditions",
+          abs(poly_eval(c5, 4.0) - 3.0) < 1e-6
+          and abs(poly_eval(c5, 4.0, 1)) < 1e-6
+          and abs(poly_eval(c5, 0.0) - 0.0) < 1e-6,
+          f"end {poly_eval(c5, 4.0):.4f}, end-vel {poly_eval(c5, 4.0, 1):.4f}")
+    c4 = quartic(0.0, 10.0, 0.0, 14.0, 0.0, 3.0)
+    check("planner: the velocity-keeping quartic reaches the target speed",
+          abs(poly_eval(c4, 3.0, 1) - 14.0) < 1e-6, f"{poly_eval(c4, 3.0, 1):.4f}")
+
+    # -- planning ----------------------------------------------------------
+    planner = FrenetPlanner()
+    corridor = build_corridor(path, [])
+    traj, diag = planner.plan(path, corridor, ego_speed_mps=10.0,
+                              target_speed_mps=12.0)
+    check("planner: a clear straight road yields a trajectory",
+          traj is not None, str(diag.get("failure")))
+    check("planner: on a clear road it stays near the reference",
+          abs(traj.target_d) < 0.6, f"{traj.target_d:+.2f} m")
+    check("planner: and accelerates toward the target speed",
+          traj.end_speed > 10.0, f"{traj.end_speed:.1f} m/s")
+
+    ob_right = Obstacle(x=1.5, y=20.0, half_width=0.3, half_length=0.3,
+                        group="VULNERABLE", track_id=1)
+    traj_r, _ = planner.plan(path, build_corridor(path, [ob_right]), 10.0, 12.0)
+    check("planner: it steers AWAY from an obstacle on the right",
+          traj_r is not None and traj_r.target_d < -0.2,
+          f"{traj_r.target_d:+.2f} m" if traj_r else "no plan")
+
+    ob_left = Obstacle(x=-1.5, y=20.0, half_width=0.3, half_length=0.3,
+                       group="VULNERABLE", track_id=2)
+    traj_l, _ = planner.plan(path, build_corridor(path, [ob_left]), 10.0, 12.0)
+    check("planner: and the other way for an obstacle on the left",
+          traj_l is not None and traj_l.target_d > 0.2,
+          f"{traj_l.target_d:+.2f} m" if traj_l else "no plan")
+
+    check("planner: the chosen trajectory keeps a real clearance margin",
+          traj_r.min_clearance_m >= PlannerConfig().min_clearance_m,
+          f"{traj_r.min_clearance_m:.2f} m")
+
+    wall = [Obstacle(x=float(x), y=20.0, half_width=0.6, half_length=0.6,
+                     group="STATIC_OBSTACLE", track_id=i)
+            for i, x in enumerate(np.arange(-4.0, 4.1, 0.8))]
+    blocked_corr = build_corridor(path, wall)
+    traj_b, diag_b = planner.plan(path, blocked_corr, 10.0, 12.0)
+    check("planner: a fully blocked road yields NO trajectory, with the reason",
+          traj_b is None and diag_b.get("failure") == "corridor blocked",
+          str(diag_b.get("failure")))
+    check("planner: and it reports where the blockage starts",
+          diag_b.get("first_blocked_s") is not None,
+          str(diag_b.get("first_blocked_s")))
+
+    # -- the competence gate ----------------------------------------------
+    short = reference_path_from_free_space(
+        road(lambda f: 0.0, lambda f: 4.0 if f < 15.0 else 0.0))
+    traj_s, diag_s = planner.plan(short, build_corridor(short, []),
+                                  ego_speed_mps=12.0, target_speed_mps=14.0)
+    check("planner: a plan is TRUNCATED to the observed road rather than "
+          "extrapolated past it",
+          traj_s is not None and traj_s.s[-1] <= short.observed_length_m + 0.5,
+          f"plan reaches {traj_s.s[-1]:.1f} m, observed "
+          f"{short.observed_length_m:.1f} m" if traj_s else "no plan")
+    check("planner: and the truncation carries its reason, so a short plan is "
+          "distinguishable from a short road",
+          traj_s is not None and traj_s.truncated
+          and "not observed" in traj_s.truncated_reason,
+          traj_s.truncated_reason if traj_s else "")
+
+    long_road = reference_path_from_free_space(
+        road(lambda f: 0.0, lambda f: 4.0, n_fwd=600))
+    unlimited, _ = planner.plan(long_road, build_corridor(long_road, []),
+                                12.0, 14.0)
+    check("planner: given road observed beyond the planning horizon, nothing "
+          "is truncated",
+          unlimited is not None and not unlimited.truncated,
+          f"plan {unlimited.s[-1]:.0f} m of {long_road.observed_length_m:.0f} m "
+          f"observed" if unlimited else "no plan")
+
+    # -- feasibility -------------------------------------------------------
+    cfg = PlannerConfig()
+    check("planner: the steering limit comes from the bicycle model, not a "
+          "tuned constant",
+          abs(cfg.max_curvature - np.tan(cfg.max_steer_rad) / cfg.wheelbase_m) < 1e-9)
+    check("planner: no chosen trajectory exceeds the steering limit",
+          traj_r.max_curvature <= cfg.max_curvature + 1e-9,
+          f"{traj_r.max_curvature:.4f} vs {cfg.max_curvature:.4f}")
+
+    tight = FrenetPlanner(PlannerConfig(max_steer_rad=0.02, wheelbase_m=2.7))
+    _, diag_t = tight.plan(path, build_corridor(path, [ob_right]), 14.0, 16.0)
+    check("planner: a vehicle that cannot steer sharply enough is told so, "
+          "rather than being handed a trajectory it cannot execute",
+          diag_t.get("n_feasible", 1) == 0 or "steer" in str(diag_t.get("failure", "")),
+          str(diag_t.get("failure")))
+
+
 def test_curvature_metric_accuracy():
     """Does the metric curve radius actually recover a known radius?
 
@@ -1510,6 +1742,8 @@ def main():
         ("Decision-group scaled collision margins",
          test_group_scaled_margins),
         ("IPM ground-plane curvature", test_ipm),
+        ("Path planning: reference, corridor, Frenet, competence gate",
+         test_planning),
         ("Metric curve radius vs known-radius arcs",
          test_curvature_metric_accuracy),
         ("Drivable-area fallback (unmarked-road lane substitute)", test_drivable_area),
