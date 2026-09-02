@@ -95,35 +95,51 @@ class IPMTransformer:
     @classmethod
     def _from_intrinsics(cls, K: np.ndarray, camera_height_m: float,
                           pitch_deg: float) -> "IPMTransformer":
-        """Flat-ground-plane assumption: every pixel's ray intersects Y=-h
-        in camera coordinates (h = camera_height_m, ground below camera),
-        optionally tilted by pitch_deg (down-tilt positive)."""
+        """Ray-ground intersection for a camera `camera_height_m` above a flat
+        road, pitched `pitch_deg` down from horizontal.
+
+        DERIVATION
+        ----------
+        Camera coordinates are X right, Y down, Z forward. A pixel p = (u,v,1)
+        corresponds to the ray direction
+
+            d_cam  = K^-1 p
+            d_road = R d_cam                    R = rotation by the pitch
+
+        expressed in a frame whose Y still points down but whose Z is
+        horizontal. The road is the plane Y = h, so the ray meets it at
+
+            t = h / d_road_y
+            X = t d_road_x        Z = t d_road_z
+
+        Both X and Z are linear in d_road and share the divisor d_road_y, so
+        the map is a homography: taking A = R K^-1,
+
+            (X, Z, 1) ~ ( h·A[0]·p , h·A[2]·p , A[1]·p )
+
+        which is the matrix assembled below -- rows 0 and 2 of A scaled by the
+        camera height, with row 1 as the homogeneous divisor.
+
+        WHAT WAS WRONG BEFORE
+        ---------------------
+        The previous version wrote the plane-induced form K(R - t nᵀ/d)K^-1
+        with t hardcoded to a zero vector. Zeroing t annihilates the entire
+        plane term, leaving K·I·K^-1 = I: the transform was the IDENTITY, so
+        `pixel_to_ground` returned its input and every "metric" quantity built
+        on it -- curve radii, obstacle positions, corridor widths -- was in
+        pixels wearing a metres label. `from_points`, which fits a homography
+        to four measured correspondences, was unaffected.
+        """
         theta = np.deg2rad(pitch_deg)
-        # Rotation of the ground plane normal into the camera frame (pitch only
-        # -- yaw/roll assumed ~0 for a forward-facing dashcam).
-        Rx = np.array([[1, 0, 0],
-                       [0, np.cos(theta), -np.sin(theta)],
-                       [0, np.sin(theta), np.cos(theta)]])
-        Kinv = np.linalg.inv(K)
+        # Pitching the camera DOWN by theta means its forward axis acquires a
+        # downward (+Y) component in the road frame: R(0,0,1) = (0, sinθ, cosθ).
+        R = np.array([[1.0, 0.0, 0.0],
+                      [0.0, np.cos(theta), np.sin(theta)],
+                      [0.0, -np.sin(theta), np.cos(theta)]])
+        A = R @ np.linalg.inv(K)
+        h = float(camera_height_m)
 
-        # Ground plane in camera coords: normal n=(0,1,0) rotated by Rx, at
-        # distance camera_height_m along that normal (Y points down in image
-        # convention, so ground is +h below the camera center).
-        n = Rx @ np.array([0.0, 1.0, 0.0])
-        d = camera_height_m
-
-        # Homography from image plane to ground plane (Hartley & Zisserman,
-        # "Multiple View Geometry", ch.13 plane-induced homography):
-        #   H_ground = K * (R - t n^T / d) * Kinv,  with R=I, t=0 (single view,
-        # ground expressed in the camera's own frame) reduces to:
-        H_img_to_cam_ground = np.eye(3) - np.zeros((3, 1)) @ n.reshape(1, 3) / d
-        H = K @ H_img_to_cam_ground @ Kinv
-        H_ground_to_img = H
-        H_img_to_ground = np.linalg.inv(H_ground_to_img)
-
-        # Scale: this construction gives camera-frame ground coordinates in
-        # the same units as camera_height_m (meters) once divided through by
-        # the homogeneous w term in `pixel_to_ground`.
+        H_img_to_ground = np.array([h * A[0], h * A[2], A[1]])
         return cls(H=H_img_to_ground)
 
     @classmethod

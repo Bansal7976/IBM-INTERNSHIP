@@ -230,7 +230,26 @@ def extract_centreline(grid: GroundGrid, max_lateral_jump_m: float = 1.5,
     prev_centre = float(grid.ego_col)
     reason = ""
 
+    # The road is not necessarily visible from the vehicle's own bumper. A
+    # camera 1.4 m up sees no ground closer than about 3.7 m, and the near
+    # field can also be occluded by the vehicle's own bonnet or by a car
+    # directly ahead. Starting the scan at row 0 regardless means the first
+    # rows are empty, the scan stops before it begins, and no path is produced
+    # on a perfectly good road.
+    #
+    # So leading empty rows are skipped -- but ONLY before any drivable space
+    # has been seen. Once the road has been picked up, a gap is a genuine
+    # break and still stops the scan.
+    start = grid.ego_row
     for row in range(grid.ego_row, grid.n_forward):
+        if _intervals(grid.drivable[row]):
+            start = row
+            break
+    else:
+        return (np.zeros(0, dtype=int), np.zeros(0), np.zeros(0),
+                "no drivable space anywhere ahead")
+
+    for row in range(start, grid.n_forward):
         chosen = _pick_interval(_intervals(grid.drivable[row]),
                                 prev_centre, max_jump_cells)
         if chosen is None:
