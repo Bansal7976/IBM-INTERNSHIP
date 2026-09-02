@@ -354,6 +354,197 @@ def test_ipm():
 #    trained and have nothing to fit a curve to there).
 # --------------------------------------------------------------------------
 
+def test_perception_planning_bridge():
+    """Image-space perception must reach the planner as real metres.
+
+    This is the join that made the planner usable on camera input rather than
+    only on synthetic grids, and building it exposed a defect that had been
+    invisible for as long as the code existed: `IPMTransformer.from_intrinsics`
+    returned the IDENTITY matrix, so `pixel_to_ground` handed back its input
+    and every "metric" quantity derived from it -- curve radii, obstacle
+    positions, corridor widths -- was in pixels wearing a metres label.
+
+    The first two checks exist so that can never come back silently.
+    """
+    import cv2
+
+    from models.ipm import IPMTransformer
+    from planning.corridor import build_corridor
+    from planning.frenet import FrenetPlanner
+    from planning.perception_bridge import (ground_grid_from_mask,
+                                            lane_mask_from_polylines,
+                                            obstacles_from_tracks)
+    from planning.reference_path import reference_path_from_free_space
+
+    W, H = 1280, 720
+    focal = W / (2 * np.tan(np.deg2rad(60) / 2))
+    cam_height, pitch = 1.4, 3.0
+    ipm = IPMTransformer.from_intrinsics(focal, focal, W / 2, H / 2,
+                                         cam_height, pitch)
+
+    # -- the regression guard ---------------------------------------------
+    check("bridge: the ground homography is NOT the identity — an identity "
+          "makes pixel_to_ground a no-op and every metre downstream a lie",
+          not np.allclose(ipm.H, np.eye(3)), str(np.round(ipm.H, 4).tolist()))
+
+    ground_to_image = np.linalg.inv(ipm.H)
+
+    def to_pixel(x_m, z_m):
+        p = np.array([x_m, z_m, 1.0]) @ ground_to_image.T
+        return p[:2] / p[2]
+
+    errors = []
+    for x_m, z_m in ((0.0, 10.0), (3.5, 25.0), (-2.0, 40.0), (1.0, 5.0)):
+        u, v = to_pixel(x_m, z_m)
+        back = ipm.pixel_to_ground(np.array([[u, v]]))[0]
+        errors.append(float(np.hypot(back[0] - x_m, back[1] - z_m)))
+    check("bridge: ground -> pixel -> ground round-trips to machine precision",
+          max(errors) < 1e-6, f"worst error {max(errors):.2e} m")
+
+    near = ipm.pixel_to_ground(np.array([[W / 2, H - 1.0]]))[0]
+    far = ipm.pixel_to_ground(np.array([[W / 2, H * 0.6]]))[0]
+    check("bridge: pixels further up the image are further down the road",
+          0 < near[1] < far[1], f"near {near[1]:.1f} m, far {far[1]:.1f} m")
+    check("bridge: the road is not visible from the bumper — a camera 1.4 m up "
+          "sees no ground closer than a few metres",
+          2.0 < near[1] < 8.0, f"{near[1]:.2f} m")
+
+    # -- a real road, projected in and recovered ---------------------------
+    half_width_m = 3.5
+    z_range = np.linspace(3.5, 45.0, 40)
+    poly = np.array([to_pixel(-half_width_m, z) for z in z_range]
+                    + [to_pixel(half_width_m, z) for z in z_range[::-1]],
+                    dtype=np.int32)
+    mask = np.zeros((H, W), dtype=np.uint8)
+    cv2.fillPoly(mask, [poly], 255)
+
+    grid = ground_grid_from_mask(mask, ipm)
+    check("bridge: the drivable mask projects into a bird's-eye grid",
+          grid is not None and grid.drivable.any(),
+          f"{grid.drivable.sum()} cells" if grid is not None else "no grid")
+
+    path = reference_path_from_free_space(grid)
+    check("bridge: a 7 m road drawn in the image comes back as a 7 m road",
+          path is not None and abs(path.half_width.mean() - half_width_m) < 0.4,
+          f"{path.half_width.mean():.2f} m vs {half_width_m}" if path else "no path")
+    check("bridge: and its reference path runs down the middle",
+          path is not None and np.abs(path.x).max() < 0.5,
+          f"max lateral {np.abs(path.x).max():.2f} m" if path else "no path")
+    check("bridge: the observed length is a real distance, not a pixel count",
+          path is not None and 20.0 < path.observed_length_m < 50.0,
+          f"{path.observed_length_m:.1f} m" if path else "no path")
+
+    # A backward warp is used precisely so distant rows do not come out holed.
+    row_coverage = grid.drivable.any(axis=1)
+    first, last = np.argmax(row_coverage), len(row_coverage) - 1 - np.argmax(row_coverage[::-1])
+    gaps = int((~row_coverage[first:last + 1]).sum())
+    check("bridge: the warped road has no holes at range (a forward warp "
+          "scatters distant pixels and the gaps read as 'not drivable')",
+          gaps == 0, f"{gaps} empty rows inside the road")
+
+    # -- boxes to ground positions ----------------------------------------
+    @dataclass
+    class Trk:
+        bbox: tuple
+        class_name: str
+        track_id: int
+        depth_speed_mps: float = 0.0
+
+    def box_at(x_m, z_m, width_m=0.7, height_m=1.7):
+        u, v = to_pixel(x_m, z_m)
+        half_px = width_m * focal / (2 * z_m)
+        return (u - half_px, v - focal * height_m / z_m, u + half_px, v)
+
+    truth = [(1.6, 22.0, "pedestrian"), (-2.0, 30.0, "truck"), (0.5, 12.0, "autorickshaw")]
+    tracks = [Trk(box_at(x, z), n, i) for i, (x, z, n) in enumerate(truth)]
+    obstacles = obstacles_from_tracks(tracks, ipm)
+
+    check("bridge: every well-formed box resolves to a ground position",
+          len(obstacles) == len(truth), f"{len(obstacles)} of {len(truth)}")
+    worst = max(np.hypot(o.x - t[0], o.y - t[1])
+                for o, t in zip(obstacles, truth)) if obstacles else 99.0
+    check("bridge: ground positions come from the box's road-contact point, "
+          "so they land where the object actually is",
+          worst < 0.5, f"worst error {worst:.2f} m")
+    check("bridge: each obstacle carries its decision group, which is what "
+          "sets its berth in the corridor",
+          [o.group for o in obstacles]
+          == ["VULNERABLE", "HEAVY_VEHICLE", "THREE_WHEELER"],
+          str([o.group for o in obstacles]))
+
+    above_horizon = Trk((100, 40, 160, 90), "car", 99)
+    only_bad = obstacles_from_tracks([above_horizon], ipm)
+    check("bridge: a box above the horizon is DROPPED, not placed at a guessed "
+          "position — a phantom obstacle stops the vehicle for nothing",
+          len(only_bad) == 0 and obstacles_from_tracks.last_dropped == 1,
+          f"{len(only_bad)} kept, {obstacles_from_tracks.last_dropped} dropped")
+
+    # Closing speed must reach the planner with the right sign: positive
+    # depth_speed_mps means the gap is shrinking, so the object approaches.
+    approaching = Trk(box_at(0.0, 25.0), "car", 7, depth_speed_mps=4.0)
+    ob = obstacles_from_tracks([approaching], ipm)[0]
+    check("bridge: an approaching object reaches the planner with a closing "
+          "velocity, not a receding one",
+          ob.vy < 0, f"vy={ob.vy:+.1f} m/s")
+
+    # -- the whole chain -----------------------------------------------
+    # The pedestrian and truck only -- the autorickshaw obstacle above is
+    # deliberately excluded here. Its own footprint (1.5 m) plus the berth
+    # THREE_WHEELER demands (1.9 m to the ego's centre line) spans more than
+    # this 7 m road on its own, and correctly leaves no sampled offset inside
+    # the sliver that remains -- that is the corridor doing its job on a road
+    # too narrow for the manoeuvre, not a defect in the chain. Proven
+    # separately below.
+    two_obstacles = obstacles[:2]
+    corridor = build_corridor(path, two_obstacles)
+    trajectory, diag = FrenetPlanner().plan(path, corridor, ego_speed_mps=10.0,
+                                            target_speed_mps=12.0)
+    check("bridge: image -> perception -> ground -> corridor -> trajectory, "
+          "end to end",
+          trajectory is not None, str(diag.get("failure")))
+    check("bridge: and the trajectory steers away from the pedestrian on the "
+          "right",
+          trajectory is not None and trajectory.target_d < 0,
+          f"{trajectory.target_d:+.2f} m" if trajectory else "none")
+
+    # The excluded case, checked on its own terms: a road too narrow for the
+    # manoeuvre must be refused, not squeezed through with no real margin.
+    all_three_corridor = build_corridor(path, obstacles)
+    blocked_traj, blocked_diag = FrenetPlanner().plan(
+        path, all_three_corridor, ego_speed_mps=10.0, target_speed_mps=12.0)
+    check("bridge: a road genuinely too narrow for the obstacle plus the "
+          "required berth is correctly refused, not squeezed through",
+          blocked_traj is None,
+          f"got a trajectory at d={blocked_traj.target_d:+.2f} m"
+          if blocked_traj else "correctly refused")
+
+    # -- the lane-line fallback -------------------------------------------
+    class Lanes:
+        def __init__(self, polylines):
+            self.polylines = polylines
+
+    left = np.array([to_pixel(-1.75, z) for z in np.linspace(5, 35, 20)])
+    right = np.array([to_pixel(1.75, z) for z in np.linspace(5, 35, 20)])
+    lane_mask = lane_mask_from_polylines(Lanes([left, right]), (H, W))
+    check("bridge: with no segmenter, the gap between lane lines still gives "
+          "the planner free space to work from",
+          lane_mask is not None and lane_mask.any())
+    lane_path = reference_path_from_free_space(ground_grid_from_mask(lane_mask, ipm))
+    check("bridge: the lane fallback yields a NARROWER corridor than the full "
+          "drivable area — the marked lane, not everything usable",
+          lane_path is not None
+          and lane_path.half_width.mean() < path.half_width.mean(),
+          f"lane {lane_path.half_width.mean():.2f} m vs "
+          f"drivable {path.half_width.mean():.2f} m" if lane_path else "no path")
+
+    # -- degradation -------------------------------------------------------
+    check("bridge: without a homography there is no grid, rather than a grid "
+          "in pixels",
+          ground_grid_from_mask(mask, None) is None)
+    check("bridge: and no obstacles either",
+          obstacles_from_tracks(tracks, None) == [])
+
+
 def test_planning():
     """Reference path, corridor and Frenet planning.
 
@@ -1902,6 +2093,8 @@ def main():
         ("Decision-group scaled collision margins",
          test_group_scaled_margins),
         ("IPM ground-plane curvature", test_ipm),
+        ("Perception -> planning bridge (image to metres)",
+         test_perception_planning_bridge),
         ("Path planning: reference, corridor, Frenet, competence gate",
          test_planning),
         ("Metric curve radius vs known-radius arcs",

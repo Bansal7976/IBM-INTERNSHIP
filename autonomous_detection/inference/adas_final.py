@@ -52,6 +52,15 @@ class FrameResult:
     collision_alerts: list = field(default_factory=list)
     overtaking: object = None
     traffic_light: str = "NO_LIGHT"
+    # Planning output. `plan_status` always says what happened, because a
+    # missing trajectory has several very different causes -- no calibration,
+    # no drivable space, a blocked corridor -- and they call for different
+    # responses.
+    reference_path: object = None
+    corridor: object = None
+    trajectory: object = None
+    plan_status: str = "not attempted"
+    plan_diagnostics: dict = field(default_factory=dict)
     latency_ms: float = 0.0
 
 
@@ -151,6 +160,13 @@ class ADASFinalPipeline:
         self._scene_lighting = scene_lighting
         self.enhancer = NightEnhancer(str(wdir / "zero_dce_plus.pth"))
         self.overtaking = OvertakingAnalyzer()
+
+        # Path planning. Optional like every other module: without it the
+        # pipeline still reports detections, alerts and an overtaking verdict,
+        # and plan_status says planning was unavailable rather than silently
+        # returning no trajectory.
+        self._planner = self._try(lambda: __import__(
+            "planning.frenet", fromlist=["FrenetPlanner"]).FrenetPlanner())
 
         self._frame_idx = 0
         self._last_depth = None
@@ -259,9 +275,81 @@ class ADASFinalPipeline:
                 scene_brightness=float(gray.mean()),
                 lighting_state=result.lighting)
 
+        # 7. Path planning. Everything above works in pixels; this is where the
+        # frame becomes metres and a trajectory. Skipped entirely without a
+        # camera-to-ground homography -- planning on an uncalibrated camera
+        # would produce a path in pixels wearing a metres label, which is worse
+        # than producing none.
+        self._plan(frame, result, ego_speed_mps)
+
         self._frame_idx += 1
         result.latency_ms = (time.perf_counter() - t0) * 1000
         return result
+
+    def _plan(self, frame, result, ego_speed_mps: float) -> None:
+        """Perception output -> a metric trajectory, or a stated reason why not."""
+        if self._planner is None:
+            result.plan_status = "planning module unavailable"
+            return
+
+        ipm = getattr(self.overtaking, "ipm", None)
+        if ipm is None:
+            result.plan_status = ("no camera-to-ground calibration; planning "
+                                  "needs metres, not pixels")
+            return
+
+        from planning.corridor import build_corridor
+        from planning.perception_bridge import (ground_grid_from_mask,
+                                                lane_mask_from_polylines,
+                                                obstacles_from_tracks)
+        from planning.reference_path import reference_path_from_free_space
+
+        # Free space, preferring the segmenter and falling back to the region
+        # between the lane lines. The fallback is narrower than the true
+        # drivable area -- it is the marked lane, not everything usable -- which
+        # is the conservative direction.
+        mask = None
+        if self.drivable_area is not None:
+            try:
+                mask = self.drivable_area.segment_mask(frame)
+            except Exception as exc:                          # noqa: BLE001
+                mask = None
+                result.plan_diagnostics["drivable_error"] = str(exc)
+        if mask is None and result.lanes is not None:
+            mask = lane_mask_from_polylines(result.lanes, frame.shape)
+        if mask is None:
+            result.plan_status = "no drivable-space estimate this frame"
+            return
+
+        grid = ground_grid_from_mask(mask, ipm)
+        if grid is None:
+            result.plan_status = "could not project the drivable mask to the ground"
+            return
+
+        path = reference_path_from_free_space(grid)
+        if path is None:
+            result.plan_status = "no usable stretch of road ahead"
+            return
+        result.reference_path = path
+
+        obstacles = obstacles_from_tracks(result.tracks, ipm)
+        result.plan_diagnostics["obstacles_dropped"] =             obstacles_from_tracks.last_dropped
+
+        corridor = build_corridor(path, obstacles)
+        result.corridor = corridor
+
+        trajectory, diag = self._planner.plan(
+            path, corridor, ego_speed_mps=ego_speed_mps,
+            target_speed_mps=max(ego_speed_mps, 1.0))
+        result.trajectory = trajectory
+        result.plan_diagnostics.update(diag)
+
+        if trajectory is None:
+            result.plan_status = f"no feasible trajectory: {diag.get('failure')}"
+        elif trajectory.truncated:
+            result.plan_status = "planned, truncated to observed road"
+        else:
+            result.plan_status = "planned"
 
     @staticmethod
     def _to_detections(yolo_result):
