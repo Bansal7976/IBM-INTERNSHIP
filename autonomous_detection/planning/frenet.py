@@ -139,6 +139,10 @@ class PlannerConfig:
     w_speed: float = 4.0
     w_clearance: float = 20.0
     w_soft_violation: float = 30.0
+    # Penalty on ending in a lateral position from which the corridor further
+    # ahead is not reachable. See _score for why this is load-bearing.
+    w_lookahead: float = 25.0
+    lookahead_m: float = 20.0
 
     # safety
     min_clearance_m: float = 0.2
@@ -160,12 +164,56 @@ class FrenetPlanner:
 
     # -- generation -------------------------------------------------------
 
-    def _candidates(self, s0, s0_dot, d0, d0_dot, target_speed):
+    def _corridor_offsets(self, corridor, d0: float) -> list:
+        """End offsets read off the corridor itself, not from a fixed grid.
+
+        A fixed grid misses narrow gaps. Squeezing past a stationary
+        auto-rickshaw on a 7 m road leaves a corridor of
+        [-2.50, -2.25] m -- real, passable, 0.25 m of room for the vehicle's
+        centre line -- and not one of (-2, -1, -0.5, 0, 0.5, 1, 2) falls
+        inside it. Every candidate was then rejected for leaving the corridor
+        and the vehicle waited behind the obstacle indefinitely, which is the
+        one thing an overtake-capable planner must not do.
+
+        So the corridor contributes its own candidates: the midpoint of the
+        admissible band at several stations, and points just inside each
+        bound. The fixed grid is kept alongside -- it is what produces smooth,
+        centred driving when there is room.
+        """
+        if corridor is None or len(corridor.s) == 0:
+            return []
+        picks = []
+        n = len(corridor.s)
+        # The NARROWEST passable band must always be offered. A localised
+        # constriction -- a stopped auto-rickshaw occupies about three metres
+        # of road -- falls between evenly spaced probes, so sampling fixed
+        # fractions of the corridor can miss the one band the vehicle actually
+        # has to fit through, and the planner then never sees the gap it is
+        # supposed to take.
+        widths = corridor.d_max - corridor.d_min
+        passable = np.flatnonzero(widths > 0)
+        stations = {0, n // 4, n // 2, (3 * n) // 4, n - 1}
+        if len(passable):
+            stations.add(int(passable[np.argmin(widths[passable])]))
+        for i in stations:
+            lo, hi = float(corridor.d_min[i]), float(corridor.d_max[i])
+            if hi <= lo:
+                continue                       # blocked here; nothing to offer
+            inset = min(0.05, (hi - lo) / 4.0)
+            picks.extend([(lo + hi) / 2.0, lo + inset, hi - inset,
+                          float(np.clip(d0, lo, hi))])
+        # Deduplicate to the nearest centimetre; near-identical end states cost
+        # a full trajectory evaluation each and buy nothing.
+        return sorted({round(d, 2) for d in picks})
+
+    def _candidates(self, s0, s0_dot, d0, d0_dot, target_speed, corridor=None):
         cfg = self.cfg
         out = []
+        offsets = sorted(set(cfg.lateral_offsets_m)
+                         | set(self._corridor_offsets(corridor, d0)))
         for T in cfg.horizons_s:
             t = np.arange(0.0, T + cfg.dt, cfg.dt)
-            for d1 in cfg.lateral_offsets_m:
+            for d1 in offsets:
                 lat = quintic(d0, d0_dot, 0.0, d1, 0.0, 0.0, T)
                 if lat is None:
                     continue
@@ -227,11 +275,23 @@ class FrenetPlanner:
         # Path curvature plus the trajectory's own lateral motion. A trajectory
         # the vehicle cannot physically steer is not a plan.
         kappa_path = np.interp(traj.s, path.s, path.curvature())
-        with np.errstate(divide="ignore", invalid="ignore"):
-            kappa_lat = np.where(traj.s_dot > 0.5,
-                                 np.gradient(traj.d_dot) / np.maximum(
-                                     np.gradient(traj.t) * traj.s_dot ** 2, 1e-6),
-                                 0.0)
+
+        # Lateral curvature taken with respect to ARC LENGTH, not time.
+        # Converting a time derivative with d''(t)/v^2 blows up as v falls --
+        # at 0.6 m/s the v^2 divisor is 0.36 and every candidate reports
+        # impossible curvature. That rejected 99 of 108 candidates for
+        # "exceeds steering limit" whenever the vehicle was crawling, so a
+        # vehicle that had stopped for an obstacle could never steer around it
+        # and stayed stopped for good. Differentiating against s has no such
+        # divisor and is the quantity the steering limit is actually about:
+        # curvature is dtheta/ds, a property of the path, not of how fast it
+        # is driven.
+        if len(traj.s) > 2 and (traj.s[-1] - traj.s[0]) > 1e-6:
+            d_prime = np.gradient(traj.d, traj.s)
+            d_double = np.gradient(d_prime, traj.s)
+            kappa_lat = d_double / np.power(1.0 + d_prime ** 2, 1.5)
+        else:
+            kappa_lat = np.zeros_like(traj.s)
         kappa = np.abs(kappa_path + kappa_lat)
         traj.max_curvature = float(np.nanmax(kappa)) if len(kappa) else 0.0
         if traj.max_curvature > cfg.max_curvature:
@@ -287,12 +347,44 @@ class FrenetPlanner:
         outside = np.maximum(soft_lo - traj.d, 0.0) + np.maximum(traj.d - soft_hi, 0.0)
         soft_violation = float(np.mean(outside)) if len(outside) else 0.0
 
+        # Where this end state leaves us for the road we can ALREADY see
+        # beyond the horizon.
+        #
+        # Without this the planner systematically refuses to look far enough
+        # ahead. Time is penalised, so the cheapest candidate is always the
+        # shortest horizon; a 2 s horizon at 8 m/s reaches 15 m, and a
+        # constriction at 25 m is simply invisible to it. The vehicle holds the
+        # centreline until the constriction enters the horizon, by which point
+        # the lateral displacement no longer fits and every candidate is
+        # rejected. Observed as a planner that approached a stopped
+        # auto-rickshaw, refused from 19 m out, and waited behind it forever --
+        # with a passable 0.25 m gap beside it the whole time.
+        #
+        # Charging the end state against the corridor one look-ahead further on
+        # makes it start drifting toward the gap while the move is still cheap.
+        # Scanned over the whole look-ahead window for the TIGHTEST band, not
+        # sampled at a single point. A stopped auto-rickshaw constrains only
+        # the three metres of road it occupies; probing one station 20 m out
+        # lands in open road either side of it and reports no constraint at
+        # all, which is how this term came to do nothing on the first attempt.
+        s_end = float(traj.s[-1]) if len(traj.s) else 0.0
+        d_end = traj.target_d
+        window = (corridor.s >= s_end) & (corridor.s <= s_end + cfg.lookahead_m)
+        lookahead_miss = 0.0
+        if window.any():
+            los, his = corridor.d_min[window], corridor.d_max[window]
+            misses = np.where(his > los,
+                              np.maximum(los - d_end, 0.0) + np.maximum(d_end - his, 0.0),
+                              0.0)
+            lookahead_miss = float(misses.max())
+
         return (cfg.w_jerk * getattr(traj, "_jerk", 0.0)
                 + cfg.w_time * getattr(traj, "_T", 0.0)
                 + cfg.w_deviation * traj.target_d ** 2
                 + cfg.w_speed * speed_err
                 + cfg.w_clearance * deficit ** 2
-                + cfg.w_soft_violation * soft_violation)
+                + cfg.w_soft_violation * soft_violation
+                + cfg.w_lookahead * lookahead_miss ** 2)
 
     # -- the competence gate ----------------------------------------------
 
@@ -352,7 +444,8 @@ class FrenetPlanner:
         whether the corridor was blocked, the speed too high for the curve, or
         the road simply unobserved -- each calls for a different response.
         """
-        candidates = self._candidates(0.0, ego_speed_mps, d0, d0_dot, target_speed_mps)
+        candidates = self._candidates(0.0, ego_speed_mps, d0, d0_dot,
+                                      target_speed_mps, corridor)
         reasons: dict = {}
         best, best_cost = None, float("inf")
 
