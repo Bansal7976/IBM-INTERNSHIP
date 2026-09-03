@@ -42,20 +42,19 @@ These are finished and verified. Nothing to re-run.
 | Ground homography round-trip accuracy | **3e-14 m** (machine precision) |
 | Collision coverage under ID churn every 3 frames | **0.00 → 0.93** after the history-recovery fix |
 | TTC margin, pedestrian vs car | **2.70 s vs 1.50 s** (set by the taxonomy) |
-| Closed-loop pedestrian clearance, grouped vs uniform | **4.20 m vs 1.73 m** |
-| Closed-loop route completion, grouped vs uniform | **100% vs 33%** |
+| Closed-loop pedestrian clearance, grouped vs uniform | **4.60 m vs 4.03 m** |
+| Closed-loop collision rate, every scenario and arm | **0%** |
+| Closed-loop route completion | **2 of 5 scenarios** — see limitations |
 
-That last pair is the headline: on the same road with the same pedestrian, the
-decision taxonomy left **two and a half times the clearance** *and* completed
-the route **three times as often**. Better safety and better progress at once,
-which is the argument the whole design rests on.
+Everything in this table is re-derived by the verification suite or the
+closed-loop harness on every run; none of it is quoted from memory.
 
-Those two closed-loop figures come from a run made *before* the most recent
-planner fixes (the low-speed curvature and look-ahead changes). They should
-hold or improve — every fix removed a case where the planner stalled — but
-**job 6 re-derives them in twenty minutes on a CPU, so confirm rather than
-quote these.** Everything above them in the table is re-derived by the
-verification suite on every run.
+The clearance figure is the one that matters for the argument: on the same road
+with the same pedestrian, the decision taxonomy left more room than a uniform
+clearance did. But read it next to the completion rate — the planner finishes
+two of the five scenarios, and the limitations section below says exactly why
+for each of the other three. Job 6 re-derives all of it in twenty minutes on a
+CPU.
 
 ---
 
@@ -341,6 +340,50 @@ bash scripts/hpc_status.sh > status.txt
 
 (Colour is dropped automatically when the output is not a terminal, so the file
 stays readable.)
+
+---
+
+## PLANNER LIMITATIONS — MEASURED, NOT GUESSED
+
+The closed-loop harness drives five scenarios. **The planner reliably completes
+two of them.** The other three stall, and the causes are understood:
+
+| Scenario | Completes | Why not |
+|---|---|---|
+| `village_road_pedestrian` | **yes, 100%** | — |
+| `occluding_truck` | **yes, 100%** | — |
+| `autorickshaw_stops` | no | The gap beside a stopped auto-rickshaw is 0.25 m wide — real and passable — but the planner's fixed lateral offsets (−2, −1, −0.5, 0, …) do not land inside it |
+| `mountain_bend` | no | An oncoming truck closes at 16.6 m/s with only 28 m of sight. The planner stops, correctly, but does not resume once the truck has passed |
+| `cattle_and_cart` | no | Same late-commitment pattern |
+
+**Every failure is a refusal, never a collision.** Across all runs the collision
+rate is 0%. The planner errs toward stopping, which is the safe direction, but
+"too cautious to finish the route" is still a defect.
+
+Two attempted fixes were **written, measured, and removed** because they made
+things worse:
+
+- **Corridor-derived offsets.** Meant to solve the narrow-gap case above. It
+  offered candidates near the corridor walls, which pinned the vehicle against
+  a boundary it could not move off when the corridor shifted. On the village
+  scenario that took completion from 100% to 0% and refusals from 17 to 138 —
+  and it did not fix the narrow-gap case it was written for.
+- **Arc-length curvature.** Meant to fix the `v²` divisor that makes the
+  steering check unreliable below about 1 m/s. Differentiating against `s`
+  reintroduces division by a near-zero quantity when the vehicle is barely
+  moving; resampling onto an even grid then over-reported curvature at the
+  trajectory ends and failed five suite checks on ordinary lane changes.
+
+The known-good configuration is what is committed. The `v²` limitation stays,
+documented in `planning/frenet.py`. A proper fix computes curvature from the
+Cartesian trajectory *after* the Frenet-to-world transform, where it is
+well-conditioned and speed-independent — a larger change than a patch.
+
+**What this means for the paper:** report the grouped-vs-uniform comparison on
+the scenarios that complete, and report the completion rate honestly alongside
+it. A planner that refuses three scenarios out of five is a real result about
+where the approach currently stands, and burying it would be the kind of thing
+a reviewer finds.
 
 ---
 

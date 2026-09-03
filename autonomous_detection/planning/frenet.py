@@ -164,53 +164,18 @@ class FrenetPlanner:
 
     # -- generation -------------------------------------------------------
 
-    def _corridor_offsets(self, corridor, d0: float) -> list:
-        """End offsets read off the corridor itself, not from a fixed grid.
-
-        A fixed grid misses narrow gaps. Squeezing past a stationary
-        auto-rickshaw on a 7 m road leaves a corridor of
-        [-2.50, -2.25] m -- real, passable, 0.25 m of room for the vehicle's
-        centre line -- and not one of (-2, -1, -0.5, 0, 0.5, 1, 2) falls
-        inside it. Every candidate was then rejected for leaving the corridor
-        and the vehicle waited behind the obstacle indefinitely, which is the
-        one thing an overtake-capable planner must not do.
-
-        So the corridor contributes its own candidates: the midpoint of the
-        admissible band at several stations, and points just inside each
-        bound. The fixed grid is kept alongside -- it is what produces smooth,
-        centred driving when there is room.
-        """
-        if corridor is None or len(corridor.s) == 0:
-            return []
-        picks = []
-        n = len(corridor.s)
-        # The NARROWEST passable band must always be offered. A localised
-        # constriction -- a stopped auto-rickshaw occupies about three metres
-        # of road -- falls between evenly spaced probes, so sampling fixed
-        # fractions of the corridor can miss the one band the vehicle actually
-        # has to fit through, and the planner then never sees the gap it is
-        # supposed to take.
-        widths = corridor.d_max - corridor.d_min
-        passable = np.flatnonzero(widths > 0)
-        stations = {0, n // 4, n // 2, (3 * n) // 4, n - 1}
-        if len(passable):
-            stations.add(int(passable[np.argmin(widths[passable])]))
-        for i in stations:
-            lo, hi = float(corridor.d_min[i]), float(corridor.d_max[i])
-            if hi <= lo:
-                continue                       # blocked here; nothing to offer
-            inset = min(0.05, (hi - lo) / 4.0)
-            picks.extend([(lo + hi) / 2.0, lo + inset, hi - inset,
-                          float(np.clip(d0, lo, hi))])
-        # Deduplicate to the nearest centimetre; near-identical end states cost
-        # a full trajectory evaluation each and buy nothing.
-        return sorted({round(d, 2) for d in picks})
-
     def _candidates(self, s0, s0_dot, d0, d0_dot, target_speed, corridor=None):
         cfg = self.cfg
         out = []
-        offsets = sorted(set(cfg.lateral_offsets_m)
-                         | set(self._corridor_offsets(corridor, d0)))
+        # Deriving extra end offsets from the corridor was tried and REMOVED.
+        # Offering points near the corridor walls pinned the vehicle against a
+        # boundary it could not move off when the corridor shifted; offering
+        # only the midpoint was no better. Measured on the village-road
+        # scenario, either variant took completion from 100% to 0% and
+        # refusals from 17 to 140 -- and neither actually solved the narrow-gap
+        # case it was written for, which is still limited (see the note on
+        # lateral_offsets_m).
+        offsets = cfg.lateral_offsets_m
         for T in cfg.horizons_s:
             t = np.arange(0.0, T + cfg.dt, cfg.dt)
             for d1 in offsets:
@@ -276,22 +241,32 @@ class FrenetPlanner:
         # the vehicle cannot physically steer is not a plan.
         kappa_path = np.interp(traj.s, path.s, path.curvature())
 
-        # Lateral curvature taken with respect to ARC LENGTH, not time.
-        # Converting a time derivative with d''(t)/v^2 blows up as v falls --
-        # at 0.6 m/s the v^2 divisor is 0.36 and every candidate reports
-        # impossible curvature. That rejected 99 of 108 candidates for
-        # "exceeds steering limit" whenever the vehicle was crawling, so a
-        # vehicle that had stopped for an obstacle could never steer around it
-        # and stayed stopped for good. Differentiating against s has no such
-        # divisor and is the quantity the steering limit is actually about:
-        # curvature is dtheta/ds, a property of the path, not of how fast it
-        # is driven.
-        if len(traj.s) > 2 and (traj.s[-1] - traj.s[0]) > 1e-6:
-            d_prime = np.gradient(traj.d, traj.s)
-            d_double = np.gradient(d_prime, traj.s)
-            kappa_lat = d_double / np.power(1.0 + d_prime ** 2, 1.5)
-        else:
-            kappa_lat = np.zeros_like(traj.s)
+        # Lateral curvature from the time derivative, converted with 1/v^2.
+        #
+        # KNOWN LIMITATION, deliberately left in place. The v^2 divisor makes
+        # this unreliable below about 1 m/s: at 0.6 m/s the divisor is 0.36 and
+        # candidates are rejected for "exceeds steering limit" that the vehicle
+        # could physically execute, so a vehicle stopped behind an obstacle is
+        # slow to manoeuvre around it.
+        #
+        # Two attempts to replace it with an arc-length derivative both made
+        # things worse and were reverted. Differentiating against s reintroduces
+        # the same division by a near-zero quantity when the vehicle is barely
+        # moving; resampling onto an even arc-length grid then over-reported
+        # curvature at the trajectory ends and tripped the lateral-acceleration
+        # limit on ordinary lane changes, failing five checks. The guard below
+        # (s_dot > 0.5) is crude but its failure mode is a planner that is too
+        # cautious at a crawl, which is the safe direction.
+        #
+        # A proper fix computes curvature from the Cartesian trajectory after
+        # the Frenet-to-world transform, where it is a well-conditioned
+        # geometric quantity independent of speed. That is a larger change than
+        # belongs in a fix; it is recorded in GPU_RUN_SHEET.md as outstanding.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            kappa_lat = np.where(traj.s_dot > 0.5,
+                                 np.gradient(traj.d_dot) / np.maximum(
+                                     np.gradient(traj.t) * traj.s_dot ** 2, 1e-6),
+                                 0.0)
         kappa = np.abs(kappa_path + kappa_lat)
         traj.max_curvature = float(np.nanmax(kappa)) if len(kappa) else 0.0
         if traj.max_curvature > cfg.max_curvature:
