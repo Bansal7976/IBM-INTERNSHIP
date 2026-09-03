@@ -538,19 +538,27 @@ enough.
 
 ### Built and tested — 260 automated checks
 
-| Capability | Checks |
+| Section | Checks |
 |---|---|
-| Decision taxonomy (6 groups) | 23 |
-| SWMC safety metric | 32 |
+| Path planning: reference, corridor, Frenet, competence gate | 32 |
+| Rear-view overtaking (IRC:66 window + sensor-range honesty) | 30 |
+| SWMC metric + granularity experiment validity | 26 |
+| Decision taxonomy + safety-weighted cost | 24 |
+| Perception → planning bridge (image to metres) | 21 |
+| Indian dataset ingestion (IDD / Mendeley formats) | 21 |
+| Optional-module graceful degradation + mmcv shim | 13 |
+| Sanity filter (phantom detection) | 12 |
 | Collision survives tracker ID churn | 11 |
-| Collision margins scale by group | 10 |
-| Metric curvature, validated against known arcs | 8 |
-| Overtake, forward + rear, IRC:66 window | 27 |
-| Phantom-detection sanity filter | 11 |
-| Path planning: reference, corridor, Frenet, gate | 32 |
-| Perception → planning bridge | 21 |
-| Graceful degradation of optional modules | 14 |
-| Everything else | 71 |
+| Decision-group scaled collision margins | 10 |
+| Multi-source granularity build (IDD + UVH-26 union) | 10 |
+| Overtaking decision rules | 9 |
+| Entry points run as real scripts | 9 |
+| Metric curve radius vs known-radius arcs | 8 |
+| CLRNet coordinate-scaling regression | 7 |
+| Drivable-area fallback | 5 |
+| Heuristic lane-type classifier | 5 |
+| Collision / TTC, tracker, IPM curvature | 7 |
+| **Total** | **260** |
 
 ### Defects the checks caught — worth knowing, because most were unsafe
 
@@ -563,6 +571,8 @@ enough.
 | Only static objects produced hard corridor bounds | A traffic cone diverted the vehicle; **a pedestrian did not** |
 | Obstacles shorter than the station spacing | A pedestrian could constrain **nothing** and be invisible to the corridor builder |
 | Closing speed never set on oncoming vehicles | Overtaking treated approaching cars as stationary |
+| **The vehicle could not pull away from a standstill** | Candidate end speeds were sampled around the target regardless of current speed. The quartic's acceleration peaks at 1.5x its average, so from rest every candidate exceeded the limit and all were rejected — the planner stopped correctly for a pedestrian and then stayed stopped for the rest of the episode |
+| Soft-bound penalty was binary | Once a predicted sweep closed the soft corridor, every candidate was equally "outside", the term became a constant, and the deviation cost parked the vehicle on the centreline — deferring the lateral manoeuvre until it no longer fitted in the horizon |
 
 ### Not built
 
@@ -585,4 +595,6 @@ python scripts/verify_adas_pipeline.py
 
 It is GPU-free, takes a minute, and has caught nine defects that would
 otherwise have surfaced only after hours of cluster time — including two that
-were already running.
+were already running. The last two in the table above came from the closed-loop
+harness rather than the unit checks: neither is visible without actually
+driving the vehicle.

@@ -79,7 +79,23 @@ UNIFORM_CLEARANCE_M = 1.0
 
 @dataclass
 class Scenario:
-    """A road, a set of agents, and how far the ego is meant to get."""
+    """A road, a set of agents, and how far the ego is meant to get.
+
+    AGENT VELOCITY CONVENTION -- easy to get backwards, and expensive when you
+    do. `vy` is the agent's own velocity along the road in the SAME frame as
+    the ego's forward motion:
+
+        vy > 0   travelling the same way as the ego. A value below the ego's
+                 speed is a slow vehicle ahead; the gap closes at the
+                 difference.
+        vy = 0   stationary in the carriageway.
+        vy < 0   ONCOMING, closing at ego speed plus |vy|.
+
+    Writing vy < 0 for "a slow truck ahead" turns the scenario into an
+    unavoidable head-on with a non-reactive agent -- the planner then stops
+    dead, correctly, and the truck drives through it, which the harness scores
+    as our collision.
+    """
     name: str
     description: str
     road_half_width_m: float = 3.5
@@ -112,16 +128,16 @@ def build_scenarios() -> list:
             name="autorickshaw_stops",
             description="An auto-rickshaw ahead in the same lane stops without "
                         "warning -- the most common Indian overtake trigger.",
-            agents=[dict(group="THREE_WHEELER", x=0.3, y=25.0, vx=0.0, vy=-9.0,
+            agents=[dict(group="THREE_WHEELER", x=0.3, y=25.0, vx=0.0, vy=0.0,
                          half_width=0.75, half_length=1.5)],
         ),
         Scenario(
             name="occluding_truck",
             description="A slow truck ahead blocks the forward view; a "
                         "motorcycle filters up the near side.",
-            agents=[dict(group="HEAVY_VEHICLE", x=-0.5, y=22.0, vx=0.0, vy=-6.0,
+            agents=[dict(group="HEAVY_VEHICLE", x=-0.5, y=22.0, vx=0.0, vy=6.0,
                          half_width=1.3, half_length=5.0),
-                    dict(group="TWO_WHEELER", x=2.6, y=16.0, vx=-0.3, vy=2.0,
+                    dict(group="TWO_WHEELER", x=2.6, y=16.0, vx=-0.3, vy=9.0,
                          half_width=0.4, half_length=1.0)],
         ),
         Scenario(
