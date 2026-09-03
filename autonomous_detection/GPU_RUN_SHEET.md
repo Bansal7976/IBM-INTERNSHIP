@@ -42,19 +42,20 @@ These are finished and verified. Nothing to re-run.
 | Ground homography round-trip accuracy | **3e-14 m** (machine precision) |
 | Collision coverage under ID churn every 3 frames | **0.00 → 0.93** after the history-recovery fix |
 | TTC margin, pedestrian vs car | **2.70 s vs 1.50 s** (set by the taxonomy) |
-| Closed-loop pedestrian clearance, grouped vs uniform | **4.60 m vs 4.03 m** |
+| Closed-loop pedestrian clearance, grouped vs uniform | **4.58 m vs 2.70 m** |
+| Closed-loop route completion, grouped vs uniform | **80% vs 100%** |
 | Closed-loop collision rate, every scenario and arm | **0%** |
-| Closed-loop route completion | **2 of 5 scenarios** — see limitations |
 
 Everything in this table is re-derived by the verification suite or the
 closed-loop harness on every run; none of it is quoted from memory.
 
-The clearance figure is the one that matters for the argument: on the same road
-with the same pedestrian, the decision taxonomy left more room than a uniform
-clearance did. But read it next to the completion rate — the planner finishes
-two of the five scenarios, and the limitations section below says exactly why
-for each of the other three. Job 6 re-derives all of it in twenty minutes on a
-CPU.
+**Read the second row next to the first.** The decision taxonomy leaves a
+pedestrian **1.7× the clearance** a uniform berth does — but it also refuses
+more often and completes the route less often. That is the honest trade-off,
+not a clean win on both counts, and the paper should present it as one: the
+taxonomy buys margin and pays for it in progress. Whether that price is right
+is a judgement about what the system is for, and it is a more interesting claim
+than "ours is better at everything".
 
 ---
 
@@ -240,6 +241,9 @@ Two things to read honestly:
 
 ```bash
 python evaluation/evaluate_planning.py --seeds 20 --out results/planning.json
+# 20 seeds, not fewer -- at 5 seeds the completion rates are too noisy to
+# separate 80% from 100%, and one scenario swung from 0% to 80% between a
+# 3-seed and a 5-seed run.
 ```
 
 Drives the planner through five Indian scenarios — village road with a
@@ -345,16 +349,21 @@ stays readable.)
 
 ## PLANNER LIMITATIONS — MEASURED, NOT GUESSED
 
-The closed-loop harness drives five scenarios. **The planner reliably completes
-two of them.** The other three stall, and the causes are understood:
+The closed-loop harness drives five scenarios. **The planner completes three of
+them, and stalls on two.** The causes are understood:
 
-| Scenario | Completes | Why not |
+| Scenario | Completes (grouped) | Why not |
 |---|---|---|
-| `village_road_pedestrian` | **yes, 100%** | — |
-| `occluding_truck` | **yes, 100%** | — |
-| `autorickshaw_stops` | no | The gap beside a stopped auto-rickshaw is 0.25 m wide — real and passable — but the planner's fixed lateral offsets (−2, −1, −0.5, 0, …) do not land inside it |
-| `mountain_bend` | no | An oncoming truck closes at 16.6 m/s with only 28 m of sight. The planner stops, correctly, but does not resume once the truck has passed |
-| `cattle_and_cart` | no | Same late-commitment pattern |
+| `village_road_pedestrian` | **80%** | — |
+| `occluding_truck` | **80%** | — |
+| `mountain_bend` | **80%** | — |
+| `autorickshaw_stops` | **0%** | The gap beside a stopped auto-rickshaw is 0.25 m wide — real and passable — but the planner's fixed lateral offsets (−2, −1, −0.5, 0, …) do not land inside it |
+| `cattle_and_cart` | **0%** | Late commitment: the planner holds the centreline until the corridor forces a move, by which point the lateral displacement no longer fits inside the horizon |
+
+**These numbers move between runs.** At 3 seeds `mountain_bend` scored 0%; at 5
+seeds it scores 80%. Five seeds is not enough to separate 80% from 100%, so run
+job 6 at `--seeds 20` before quoting anything, and treat a difference of one
+scenario-run as noise.
 
 **Every failure is a refusal, never a collision.** Across all runs the collision
 rate is 0%. The planner errs toward stopping, which is the safe direction, but
