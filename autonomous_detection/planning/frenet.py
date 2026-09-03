@@ -172,8 +172,27 @@ class FrenetPlanner:
                 d = poly_eval(lat, t)
                 d_dot = poly_eval(lat, t, 1)
                 d_jerk = poly_eval(lat, t, 3)
+                # Reachable end speeds only. Sampling the target speed
+                # regardless of the current one means that from a standstill
+                # every candidate demands more acceleration than the vehicle
+                # has -- 0 to 11 m/s inside a 4 s horizon needs 2.75 m/s^2
+                # against a 2.5 limit -- so all of them are rejected on
+                # acceleration and the vehicle can never pull away again.
+                # Observed in closed loop as a planner that stopped correctly
+                # for a pedestrian and then stayed stopped for the rest of the
+                # episode, long after the road had cleared.
+                # The quartic starts and ends at zero acceleration, so its
+                # acceleration is not constant: a(t) = 6*dv/T * [t/T - (t/T)^2],
+                # which peaks at t = T/2 with a_max = 1.5*dv/T. The reachable
+                # speed change in one horizon is therefore (2/3)*a_limit*T, not
+                # a_limit*T -- using the latter puts every candidate 50% over
+                # the limit and all of them get rejected.
+                REACHABLE = 2.0 / 3.0
+                v_reachable = s0_dot + REACHABLE * cfg.max_accel_mps2 * T
+                v_floor = max(s0_dot - REACHABLE * cfg.max_decel_mps2 * T, 0.0)
                 for dv in cfg.speed_offsets_mps:
-                    v1 = float(np.clip(target_speed + dv, 0.0, cfg.max_speed_mps))
+                    v1 = float(np.clip(target_speed + dv, v_floor,
+                                       min(cfg.max_speed_mps, v_reachable)))
                     lon = quartic(s0, s0_dot, 0.0, v1, 0.0, T)
                     if lon is None:
                         continue
@@ -249,8 +268,24 @@ class FrenetPlanner:
 
         # Straying outside the soft bounds is allowed but paid for -- that is
         # what keeps a crowded street plannable instead of infeasible.
-        soft_ok = corridor.contains(traj.s, traj.d, soft=True)
-        soft_violation = float(np.mean(~soft_ok)) if len(soft_ok) else 0.0
+        #
+        # Graded by DISTANCE outside, not by the fraction of points outside.
+        # A binary count stops discriminating the moment the soft corridor
+        # closes completely: every candidate is then equally "outside", the
+        # term becomes a constant added to all of them, and the deviation cost
+        # takes over and parks the vehicle on the centreline. Observed in
+        # closed loop as a planner that oscillated between centre and offset
+        # while a pedestrian walked in, deferring the manoeuvre until the hard
+        # corridor forced it -- by which point the lateral move no longer fit
+        # inside the horizon and the plan failed outright.
+        #
+        # With a graded penalty, a candidate hugging the edge of the swept
+        # region always scores better than one sitting deep inside it, so the
+        # vehicle starts moving over while it still can.
+        soft_lo = np.interp(traj.s, corridor.s, corridor.soft_min)
+        soft_hi = np.interp(traj.s, corridor.s, corridor.soft_max)
+        outside = np.maximum(soft_lo - traj.d, 0.0) + np.maximum(traj.d - soft_hi, 0.0)
+        soft_violation = float(np.mean(outside)) if len(outside) else 0.0
 
         return (cfg.w_jerk * getattr(traj, "_jerk", 0.0)
                 + cfg.w_time * getattr(traj, "_T", 0.0)
