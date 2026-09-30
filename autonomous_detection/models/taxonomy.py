@@ -171,6 +171,37 @@ NAME_TO_GROUP = {
     # factor of four to six, and it errs toward seeing an obstacle that is not
     # quite what we called it rather than not seeing it at all.
     "vehicle fallback": "HEAVY_VEHICLE",
+
+    # --- South Asian vehicle names (HeteroTraffic, Bangladesh/India) ---
+    # IDD became inaccessible, so the corpus is now assembled from open
+    # datasets whose vocabularies do not overlap. That is what this taxonomy
+    # is for -- three incompatible label schemes reduced to one decision space
+    # -- but it only works if every name is actually mapped, so these are
+    # spelled out rather than left to fall through.
+    "mpv": "LIGHT_VEHICLE",              # multi-purpose vehicle, car-like
+    "shoppingvan": "LIGHT_VEHICLE", "shopping van": "LIGHT_VEHICLE",
+    "pickup": "LIGHT_VEHICLE",
+    "cng": "THREE_WHEELER",              # the CNG auto-rickshaw
+    "easybike": "THREE_WHEELER", "easy bike": "THREE_WHEELER",
+    "leguna": "THREE_WHEELER",           # converted small passenger carrier
+    "powertiller": "HEAVY_VEHICLE", "power tiller": "HEAVY_VEHICLE",
+    "wheelbarrow": "STATIC_OBSTACLE", "wheel barrow": "STATIC_OBSTACLE",
+    "animal driven cart": "VULNERABLE",  # hyphen variant of "animal drawn cart"
+
+    # Bhotbhoti: a locally assembled diesel vehicle, sometimes a heavy
+    # three-wheeler and sometimes a small goods truck. No single group fits,
+    # and our own cost function settles it the same way it settled
+    # "vehicle fallback": calling a three-wheeler a heavy vehicle is an
+    # over-caution error priced at 0.10, while calling a laden goods vehicle a
+    # three-wheeler is an under-caution error priced far higher.
+    "bhotbhoti": "HEAVY_VEHICLE",
+
+    # --- DATS_2022 (Indian roads) -- names read from its 1,715 XML files ---
+    "rikshaw": "THREE_WHEELER",          # the dataset's own spelling
+    "goat": "VULNERABLE", "camel": "VULNERABLE", "horse": "VULNERABLE",
+    "traffic police": "VULNERABLE", "hawker": "VULNERABLE",
+    "crane": "HEAVY_VEHICLE", "road roller": "HEAVY_VEHICLE",
+    "barricade": "STATIC_OBSTACLE", "garbage bin": "STATIC_OBSTACLE",
 }
 
 # Classes that are deliberately NOT part of the obstacle taxonomy, as opposed
@@ -184,6 +215,18 @@ EXCLUDED_CLASSES = {
     "misc", "miscellaneous", "other", "unknown", "background",
     "signboard", "sign board", "billboard", "hoarding",
     "speed breaker", "speedbreaker", "speed bump", "pothole",
+    # DATS_2022 annotates the whole scene, not only road users. About 40% of
+    # its boxes are infrastructure -- trees, lamp posts, buildings, the road
+    # itself. None is a path obstacle a detector should be trained to report,
+    # and without listing them here the pre-flight check counts them as
+    # UNRECOGNISED and correctly refuses to start the job.
+    "tree", "lamp post", "lamo post", "traffic signal", "signal",
+    "road divider", "board", "road", "traffic sign board", "road sign board",
+    "electricity pole", "building", "wall", "zebra crossing", "bridge",
+    "vegetation", "footpath", "bus stop", "tyre works", "gate", "manhole",
+    "fuel station", "pedestrian bridge", "flag", "temple", "stall",
+    "digital display", "petrol pump", "overbridge", "metro station",
+    "island stucture", "milestone", "water", "wa",
 }
 
 # A comparable grouping organised by APPEARANCE rather than decision
@@ -220,6 +263,17 @@ IDD_LEVEL3_GROUPS = {
     "barrier": "obstacle", "traffic cone": "obstacle", "cone": "obstacle",
     "debris": "obstacle", "obstacle": "obstacle",
     "vehicle fallback": "vehicle fallback",
+    "mpv": "car", "shoppingvan": "vehicle fallback",
+    "shopping van": "vehicle fallback", "pickup": "vehicle fallback",
+    "cng": "autorickshaw", "easybike": "autorickshaw",
+    "easy bike": "autorickshaw", "leguna": "autorickshaw",
+    "powertiller": "vehicle fallback", "power tiller": "vehicle fallback",
+    "wheelbarrow": "cart", "wheel barrow": "cart",
+    "animal driven cart": "animal", "bhotbhoti": "vehicle fallback",
+    "rikshaw": "autorickshaw", "goat": "animal", "camel": "animal",
+    "horse": "animal", "traffic police": "person", "hawker": "person",
+    "crane": "vehicle fallback", "road roller": "vehicle fallback",
+    "barricade": "obstacle", "garbage bin": "obstacle",
     "bike": "motorcycle", "scooty": "motorcycle", "moped": "motorcycle",
     "pillion": "person", "hawker": "person", "vendor": "person",
     "goat": "animal", "elephant": "animal", "camel": "animal",

@@ -95,6 +95,38 @@ def build_image_index(src: Path) -> dict:
 #   record = (image_path, [(class_name, x1, y1, x2, y2), ...], width, height)
 # --------------------------------------------------------------------------
 
+def image_size(path: Path) -> tuple:
+    """(width, height) as the image will be LOADED, from its header alone.
+
+    Honours the EXIF orientation tag. Phone photos are often stored landscape
+    with a tag saying "rotate 90"; annotation tools and OpenCV (and therefore
+    the training loader) display them portrait, so boxes are drawn in portrait
+    coordinates. Taking the raw header size for such a file swaps width and
+    height and puts every box in the wrong place. DATS_2022 has these: one
+    real file is stored 4624x3472 and annotated as 3472x4624.
+    """
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            w, h = im.size
+            try:
+                orientation = im.getexif().get(274, 1)    # 274 = Orientation
+            except Exception:                           # noqa: BLE001
+                orientation = 1
+            # 5-8 are the orientations that involve a 90-degree turn.
+            return (h, w) if orientation in (5, 6, 7, 8) else (w, h)
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        import cv2
+        im = cv2.imread(str(path))
+        if im is not None:
+            return im.shape[1], im.shape[0]
+    except Exception:                                   # noqa: BLE001
+        pass
+    return 0, 0
+
+
 def read_voc(src: Path, image_index: dict):
     for xml_path in sorted(src.rglob("*.xml")):
         try:
@@ -110,6 +142,12 @@ def read_voc(src: Path, image_index: dict):
         img = find_image(xml_path.stem, image_index)
         if img is None:
             continue
+        if w <= 0 or h <= 0:
+            # Some LabelImg exports write <width>0</width>. DATS_2022 does, on
+            # real files -- which divided every box by zero during conversion.
+            # The XML's own size is still preferred when present, since boxes
+            # were drawn against it; the image header is the fallback only.
+            w, h = image_size(img)
         boxes = []
         for obj in root.findall("object"):
             name = (obj.findtext("name") or "").strip()
@@ -307,8 +345,13 @@ def main():
         img_dir.mkdir(parents=True, exist_ok=True)
         lbl_dir.mkdir(parents=True, exist_ok=True)
 
-        written = 0
+        written = unsized = 0
         for img, boxes, w, h in items:
+            if w <= 0 or h <= 0:
+                # Size unknown even from the image itself (unreadable file).
+                # Skipped and counted, never converted with a guessed size.
+                unsized += 1
+                continue
             lines = []
             for name, x1, y1, x2, y2 in boxes:
                 cx, cy = (x1 + x2) / 2 / w, (y1 + y2) / 2 / h
@@ -335,7 +378,8 @@ def main():
             (lbl_dir / f"{img.stem}.txt").write_text("\n".join(lines),
                                                      encoding="utf-8")
             written += 1
-        print(f"  {split:<6} {written:>6} images")
+        print(f"  {split:<6} {written:>6} images"
+              + (f"   ({unsized} skipped: image size unreadable)" if unsized else ""))
 
     names_block = "\n".join(f"  {i}: {n}" for i, n in enumerate(class_names))
     cfg = args.out / "data.yaml"

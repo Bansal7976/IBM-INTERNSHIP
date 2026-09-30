@@ -74,15 +74,15 @@ for d in data/IDD_Detection data/idd data/DATS_2022 data/HeteroTraffic \
     fi
 done
 if [ "$RAW_FOUND" -eq 0 ]; then
-    status_line TODO "any Indian dataset downloaded" "IDD: https://idd.insaan.iiit.ac.in/"
-    [ -z "$NEXT" ] && NEXT="# Download IDD (registration required), unpack into data/IDD_Detection"
+    status_line TODO "any Indian dataset downloaded" "open datasets, no registration"
+    [ -z "$NEXT" ] && NEXT="python data/download_open_datasets.py    # on the LOGIN node"
 fi
 echo ""
 
 # ------------------------------------------------------ 2. converted to YOLO
 echo "2. CONVERTED TO YOLO"
 CONV_FOUND=0
-for d in data/*_yolo; do
+for d in data/*_yolo data/*_native; do
     [ -d "$d" ] || continue
     n=$(( $(count_images "$d/train/images") + $(count_images "$d/val/images") ))
     if [ "$n" -gt 0 ]; then
@@ -93,7 +93,7 @@ done
 if [ "$CONV_FOUND" -eq 0 ]; then
     status_line TODO "converted dataset" "one command handles VOC/COCO/YOLO"
     [ -z "$NEXT" ] && [ "$RAW_FOUND" -eq 1 ] && \
-        NEXT="python data/prepare_indian.py --src data/IDD_Detection --out data/idd_yolo --report-only"
+        NEXT="qsub training/pbs/granularity_step1_prepare.pbs    # converts all sources itself"
 fi
 echo ""
 

@@ -85,8 +85,22 @@ if [ ! -d data/idd_native ] && [ -d data/IDD_Detection ]; then
         --out data/idd_native --keep-source-names || exit 1
 fi
 
+# Open datasets that replace IDD while its portal is unreachable. Both are
+# CC BY 4.0 and downloadable without registration (see
+# scripts/download_open_datasets.sh). HeteroTraffic supplies pedestrians and a
+# wide spread of South Asian vehicle types; DATS_2022 supplies animals and
+# animal-drawn carts. Together with UVH-26 they cover all six decision groups.
+if [ ! -d data/hetero_native ] && [ -d data/HeteroTraffic ]; then
+    echo "Building HeteroTraffic with its native label names ..."
+    python data/prepare_indian.py --src data/HeteroTraffic         --out data/hetero_native || exit 1
+fi
+if [ ! -d data/dats_native ] && [ -d data/DATS_2022 ]; then
+    echo "Building DATS_2022 with its native label names ..."
+    python data/prepare_indian.py --src data/DATS_2022         --out data/dats_native || exit 1
+fi
+
 SRCS=""
-for candidate in data/idd_native data/uvh26_native; do
+for candidate in data/idd_native data/uvh26_native data/hetero_native data/dats_native; do
     [ -d "$candidate" ] && SRCS="$SRCS $candidate"
 done
 
@@ -105,13 +119,13 @@ done
 echo "sources: $SRCS"
 
 case "$SRCS" in
-    *idd_native*) ;;
+    *idd_native*|*hetero_native*|*dats_native*) ;;
     *) echo ""
-       echo "NOTE: no IDD source. UVH-26 is vehicles only, so VULNERABLE"
-       echo "      (pedestrians, riders, animals) will not appear in any arm"
-       echo "      and the safety-weighted result will not test the case it"
-       echo "      exists for. Add data/idd_native when IDD access comes"
-       echo "      through, and re-run." ;;
+       echo "NOTE: no source with pedestrians or animals. UVH-26 is vehicles"
+       echo "      only, so VULNERABLE will not appear in any arm and the"
+       echo "      safety-weighted result will not test the case it exists for."
+       echo "      Run scripts/download_open_datasets.sh on the login node"
+       echo "      (HeteroTraffic + DATS_2022), then re-submit." ;;
 esac
 
 echo "============================================"

@@ -354,6 +354,90 @@ def test_ipm():
 #    trained and have nothing to fit a curve to there).
 # --------------------------------------------------------------------------
 
+def test_open_datasets():
+    """The datasets that replace IDD must convert correctly and map fully.
+
+    Each check here pins something found on the REAL files, not on synthetic
+    fixtures: DATS_2022 ships XMLs whose <size> is 0x0, and phone photos whose
+    stored orientation differs from the one they were annotated in.
+    """
+    import subprocess
+    import tempfile
+    from PIL import Image
+    from data.prepare_indian import image_size
+    from models.taxonomy import EXCLUDED_CLASSES, NAME_TO_GROUP, normalise
+
+    hetero = ["Motorbike", "MPV", "Pedestrian", "Pickup", "PowerTiller",
+              "Rickshaw", "Bicycle", "Bus", "Bhotbhoti", "Car", "CNG",
+              "Easybike", "Leguna", "ShoppingVan", "Truck", "Van", "Wheelbarrow"]
+    missing = [n for n in hetero if normalise(n) not in NAME_TO_GROUP]
+    check("open data: all 17 HeteroTraffic classes map to a decision group",
+          not missing, str(missing))
+    check("open data: HeteroTraffic supplies the VULNERABLE group UVH-26 lacks",
+          NAME_TO_GROUP[normalise("Pedestrian")] == "VULNERABLE")
+
+    dats_road_users = ["Bike", "Car", "Rikshaw", "person", "Person", "Tempo",
+                       "Bus", "Cattle", "Truck", "Goat", "Cycle", "Dog",
+                       "Traffic Police", "Cart", "Tractor", "Crane", "Camel",
+                       "Bullock Cart", "Barricade", "Horse", "Road Roller",
+                       "Hawker", "Train"]
+    missing = [n for n in dats_road_users if normalise(n) not in NAME_TO_GROUP]
+    check("open data: every DATS_2022 road-user class maps", not missing,
+          str(missing))
+    check("open data: DATS animals (cattle, goat, camel, horse, dog) are all "
+          "VULNERABLE",
+          all(NAME_TO_GROUP[normalise(a)] == "VULNERABLE"
+              for a in ("Cattle", "Goat", "Camel", "Horse", "Dog")))
+    dats_scenery = ["Tree", "Lamp Post", "Traffic Signal", "Road Divider",
+                    "Building", "Road", "Wall", "Electricity Pole", "Hoarding"]
+    check("open data: DATS scenery (trees, lamp posts, buildings) is excluded "
+          "by design, not left unrecognised to trip the pre-flight guard",
+          all(normalise(n) in EXCLUDED_CLASSES for n in dats_scenery),
+          str([n for n in dats_scenery if normalise(n) not in EXCLUDED_CLASSES]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        plain = tmp / "plain.jpg"
+        Image.new("RGB", (640, 480)).save(plain)
+        check("open data: image size read from the header when the XML says 0",
+              image_size(plain) == (640, 480), str(image_size(plain)))
+
+        rotated = tmp / "phone.jpg"
+        exif = Image.Exif()
+        exif[274] = 6                        # "rotate 90 CW to display"
+        Image.new("RGB", (4624, 3472)).save(rotated, exif=exif)
+        check("open data: a phone photo with an EXIF rotation reports the size "
+              "it will be LOADED at (portrait), not the stored one",
+              image_size(rotated) == (3472, 4624), str(image_size(rotated)))
+
+        # End to end: a zero-size VOC file must convert, not divide by zero.
+        src = tmp / "voc"
+        (src / "imgs").mkdir(parents=True)
+        (src / "xml").mkdir()
+        Image.new("RGB", (800, 600)).save(src / "imgs" / "a.jpg")
+        (src / "xml" / "a.xml").write_text(
+            "<annotation><size><width>0</width><height>0</height></size>"
+            "<object><name>Cattle</name><bndbox><xmin>100</xmin><ymin>150</ymin>"
+            "<xmax>300</xmax><ymax>450</ymax></bndbox></object></annotation>",
+            encoding="utf-8")
+        out = tmp / "out"
+        r = subprocess.run([sys.executable, str(PROJECT_ROOT / "data" / "prepare_indian.py"),
+                            "--src", str(src), "--out", str(out), "--val-frac", "0"],
+                           capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+                           timeout=120)
+        labels = list(out.glob("*/labels/*.txt"))
+        check("open data: an XML with a 0x0 size converts instead of crashing",
+              r.returncode == 0 and len(labels) == 1,
+              (r.stderr or r.stdout)[-300:])
+        if labels:
+            vals = [float(v) for v in labels[0].read_text().split()[1:]]
+            want = [200 / 800, 300 / 600, 200 / 800, 300 / 600]
+            check("open data: and its box lands in the right place, scaled by "
+                  "the real image size",
+                  all(abs(a - b) < 1e-4 for a, b in zip(vals, want)),
+                  f"{vals} vs {want}")
+
+
 def test_perception_planning_bridge():
     """Image-space perception must reach the planner as real metres.
 
@@ -2093,6 +2177,8 @@ def main():
         ("Decision-group scaled collision margins",
          test_group_scaled_margins),
         ("IPM ground-plane curvature", test_ipm),
+        ("Open datasets replacing IDD (HeteroTraffic, DATS_2022)",
+         test_open_datasets),
         ("Perception -> planning bridge (image to metres)",
          test_perception_planning_bridge),
         ("Path planning: reference, corridor, Frenet, competence gate",

@@ -16,7 +16,7 @@ Run it any time. It only reads; it never submits anything.
 
 | # | Job | Where | Time | Needs |
 |---|---|---|---|---|
-| 0 | Download IDD | login node | ~1 h | registration |
+| 0 | Download open datasets | login node | ~1–2 h | nothing |
 | 1 | Convert to YOLO | login node | ~10 min | job 0 |
 | 2 | Build 3 label spaces | **CPU queue** | ~1 h | job 1 |
 | 3 | Train 3 models | **GPU × 3** | 8–24 h each | job 2 |
@@ -26,7 +26,7 @@ Run it any time. It only reads; it never submits anything.
 | 7 | Annotated video | GPU interactive | ~30 min | job 3 |
 
 **Only jobs 3, 4 and 5 need a GPU.** Job 6 needs nothing at all and produces a
-real result — start there if you are waiting on the IDD download.
+real result — start there while the datasets download.
 
 ---
 
@@ -77,42 +77,56 @@ and every job below will hit it.
 
 ---
 
-### Job 0 — get the data (login node, no GPU)
+### Job 0 — get the data (login node, no GPU, ~1–2 h)
 
-The problem statement names **IDD** (https://idd.insaan.iiit.ac.in/) — needs
-registration — and Mendeley Indian traffic datasets.
+**IDD's portal is unreachable**, and two Mendeley datasets that looked like
+replacements (Indistreet2K25, IndiaScene365) are embargoed until 2030. What is
+open, CC BY 4.0 and downloadable without registration covers all six decision
+groups:
 
-Download on the **login node**, not a compute node: compute nodes usually have
-no outbound internet.
+| Dataset | Images | Supplies | Size |
+|---|---|---|---|
+| UVH-26 | 26,646 | Indian vehicles, 14 types | ~HF |
+| HeteroTraffic | 16,289 | **pedestrians** + 17 South Asian vehicle classes | 4.9 GB |
+| DATS_2022 | ~1,590 annotated | **cattle, goats, dogs, camels, horses, bullock carts** | 6.6 GB |
 
-Unpack into `data/IDD_Detection/`.
+One command, on the **login node** (compute nodes have no internet):
+
+```bash
+python -m pip install -q huggingface_hub pillow
+python data/download_open_datasets.py
+```
+
+Resumable — if it is interrupted, run it again and it skips what is already
+there. HeteroTraffic's zip is checked against Mendeley's published SHA-256
+before unpacking, because a truncated 4.9 GB archive unpacks halfway and
+silently drops a random slice of images.
 
 ---
 
-### Job 1 — convert to YOLO (login node, ~10 min)
-
-**Look before you convert:**
+### Job 1 — look before converting (login node, ~5 min)
 
 ```bash
-python data/prepare_indian.py --src data/IDD_Detection --out data/idd_yolo --report-only
+python data/prepare_indian.py --src data/DATS_2022     --out data/dats_native   --report-only
+python data/prepare_indian.py --src data/HeteroTraffic --out data/hetero_native --report-only
 ```
 
-This writes nothing. It prints every class name, its box count, and which
-decision group it maps to.
+Writes nothing. Prints every class, its box count and its decision group.
+**Read the UNRECOGNISED line.** For DATS expect about 66% kept and 34%
+"excluded by design" — DATS annotates the whole scene, so trees, lamp posts and
+buildings are labelled too and are correctly left out. Exactly one box is
+unrecognised (a corrupt label of repeated W's); that is expected.
 
-**Read the UNRECOGNISED line.** An unrecognised class is data about to be
-silently discarded. It is far cheaper to see that here than to notice a missing
-class after 24 GPU-hours. If anything is unrecognised, send Vishal the output —
-it is a one-line fix in `models/taxonomy.py`.
+If HeteroTraffic reports that it cannot find class names, send Vishal the
+output: its YOLO class ids need a names file, and the order must not be
+guessed.
 
-If everything maps:
+You do not need to convert by hand — job 2 converts all sources itself.
 
-```bash
-python data/prepare_indian.py --src data/IDD_Detection --out data/idd_yolo
-```
-
-Auto-detects VOC XML, COCO JSON and YOLO txt, so the same command works for
-DATS_2022, HeteroTraffic, IndiaScene365 and Indistreet2K25.
+Two real-data defects this step already handles, found on actual DATS files:
+some XMLs declare their image size as 0×0 (conversion used to divide by zero),
+and phone photos stored landscape but annotated portrait via an EXIF rotation
+tag (the fallback size is now read the way the training loader reads it).
 
 ---
 
