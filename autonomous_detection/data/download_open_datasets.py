@@ -20,7 +20,7 @@ it.
 
 RUN IT ON THE LOGIN NODE. Compute nodes usually have no outbound internet.
 
-    python data/download_open_datasets.py            # all three
+    python data/download_open_datasets.py            # DATS_2022 + HeteroTraffic
     python data/download_open_datasets.py --only dats hetero
     python data/download_open_datasets.py --list     # sizes, download nothing
 
@@ -194,19 +194,28 @@ def download_uvh26(list_only: bool) -> bool:
         print("  huggingface_hub missing: python -m pip install huggingface_hub")
         return False
     snapshot_download(repo_id=spec["hf_repo"], repo_type="dataset",
-                      local_dir=str(root), max_workers=8)
+                      local_dir=str(root), max_workers=2)
+    # Written ONLY after snapshot_download returns without raising. The
+    # training-data build checks for it, so a partial download is never converted.
+    (root / ".complete").write_text("ok")
     return True
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="+", choices=sorted(DATASETS),
-                    help="download only these (default: all three)")
+                    help="download only these (default: dats and hetero; uvh26 is opt-in, see main())")
     ap.add_argument("--list", action="store_true",
                     help="print file counts and sizes; download nothing")
     args = ap.parse_args()
 
-    keys = args.only or ["dats", "hetero", "uvh26"]
+    # UVH-26 is NOT in the default set. Hugging Face allows 1000 API requests per
+    # 5 minutes and the dataset is ~26,650 separate files, so a full download
+    # needs well over two hours and an HF_TOKEN. Without one it stops part-way
+    # (observed: 1,000 files, 3.3 GB) and leaves a half-built dataset that a
+    # later step could mistake for a complete one. Ask for it explicitly with
+    # `--only uvh26`; a completion marker is written only when it finishes.
+    keys = args.only or ["dats", "hetero"]
     ok = True
     for key in keys:
         try:

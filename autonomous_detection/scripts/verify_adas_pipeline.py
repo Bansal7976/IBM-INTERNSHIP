@@ -628,6 +628,31 @@ def test_perception_planning_bridge():
     check("bridge: and no obstacles either",
           obstacles_from_tracks(tracks, None) == [])
 
+    # -- the non-GUI calibration writer ------------------------------------
+    # Without weights/ipm_calibration.json the pipeline produces no trajectory
+    # at all, and the only other way to make one needs a window and a mouse.
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "calib.json"
+        r = subprocess.run([sys.executable,
+                            str(PROJECT_ROOT / "scripts" / "make_ipm_calibration.py"),
+                            "--width", "1280", "--height", "720", "--out", str(out)],
+                           capture_output=True, text=True, timeout=120)
+        loaded = IPMTransformer.load(out) if out.exists() else None
+        check("calibration: the script writes a calibration the pipeline can load",
+              r.returncode == 0 and loaded is not None,
+              (r.stderr or r.stdout)[-200:])
+        check("calibration: and it is a real homography, not the identity that "
+              "would turn every 'metre' into a pixel",
+              loaded is not None and not np.allclose(loaded.H, np.eye(3)))
+        r2 = subprocess.run([sys.executable,
+                             str(PROJECT_ROOT / "scripts" / "make_ipm_calibration.py"),
+                             "--out", str(Path(tmp) / "none.json")],
+                            capture_output=True, text=True, timeout=120)
+        check("calibration: without a frame size it refuses rather than guessing one",
+              r2.returncode != 0 and not (Path(tmp) / "none.json").exists())
+
 
 def test_planning():
     """Reference path, corridor and Frenet planning.

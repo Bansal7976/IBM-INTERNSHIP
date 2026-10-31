@@ -80,11 +80,31 @@ fi
 # The checkpoint's head is shaped for a different label space, and more
 # importantly it carries whatever biases the earlier training left behind --
 # which would not be identical across the three runs.
-BASE=yolo11x.pt
+# Defaults are the full-size experiment. MODEL and EPOCHS exist ONLY so a
+# crowded GPU queue does not force anyone to edit this script on the cluster:
+#
+#     qsub -N gran_decision -o logs/gran_decision.log \
+#          -v LEVEL=decision,MODEL=yolo11m.pt,EPOCHS=50 \
+#          training/pbs/granularity_step2_train.pbs
+#
+# Whatever you choose, ALL THREE arms must get the SAME MODEL and EPOCHS. The
+# comparison is only valid if the label space is the single thing that differs;
+# a 50-epoch fine arm against a 100-epoch decision arm measures training
+# length, not taxonomy. The weights file must already be in this directory
+# (download it on the login node) -- do not rely on the job fetching it.
+BASE="${MODEL:-yolo11x.pt}"
+EPOCHS="${EPOCHS:-100}"
+PATIENCE=$(( EPOCHS / 4 > 5 ? EPOCHS / 4 : 5 ))
+if [ ! -f "$BASE" ]; then
+    echo "ERROR: $BASE not found in $(pwd)."
+    echo "Put it here from the login node; compute nodes may have no internet."
+    exit 1
+fi
 
 echo "============================================"
 echo "  GRANULARITY EXPERIMENT — TRAIN [$LEVEL]"
 echo "  data : $DATA"
+echo "  model: $BASE   epochs: $EPOCHS   patience: $PATIENCE"
 echo "  GPU  : $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
 echo "  $(date)"
 echo "============================================"
@@ -99,8 +119,8 @@ yolo detect train \
   model=$BASE \
   data=$DATA \
   imgsz=640 \
-  epochs=100 \
-  patience=25 \
+  epochs=$EPOCHS \
+  patience=$PATIENCE \
   batch=16 \
   device=0 \
   seed=0 \

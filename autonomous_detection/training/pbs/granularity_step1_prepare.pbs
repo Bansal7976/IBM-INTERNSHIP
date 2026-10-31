@@ -72,7 +72,9 @@ echo "environment: OK"
 #
 # Both conversions are cheap and reuse data already on disk, so they are built
 # here rather than left as a manual step to forget.
-if [ ! -d data/uvh26_native ] && [ -d data/UVH26 ]; then
+# UVH-26 is used only if its download COMPLETED (marker file). A rate-limited,
+# half-finished download must never be converted and mixed into the training set.
+if [ ! -d data/uvh26_native ] && [ -f data/UVH26/.complete ]; then
     echo "Building UVH-26 with its native body-type classes ..."
     python data/prepare_uvh26.py --data_root data/UVH26 \
         --out data/uvh26_native --keep-source-names || exit 1

@@ -1,3 +1,9 @@
+> **SUPERSEDED. Start with [HANDOVER.md](HANDOVER.md).** It is the single, current
+> source of truth for where the project stands and what to run. This file is kept for
+> its background detail. Its conda instructions were wrong for this cluster and have
+> been corrected: the `auto_det` env is an empty shell, and the real stack is the
+> system Python 3.9 with packages in `~/.local`.
+
 # Implementation Guide — Krish
 
 Everything in this repository is built and tested. Your job is to **run it on
@@ -267,8 +273,9 @@ no explanation.
 ### Verify before anything else
 
 ```bash
-source /home/soft/anaconda3/etc/profile.d/conda.sh
-conda activate auto_det
+# No conda activation. The auto_det env on this cluster is an empty shell
+# (no bin/python). The real stack is the system python 3.9 with packages
+# in ~/.local, which is what `python` resolves to by default.
 python scripts/verify_adas_pipeline.py
 ```
 
@@ -393,12 +400,11 @@ tail -f logs/gran_decision.log
 The first lines must read:
 
 ```
-python : /home/soft/anaconda3/envs/auto_det/bin/python
-conda environment: OK
+python : /usr/bin/python  (Python 3.9.21)
+environment: OK
 ```
 
-If you see `python resolved to /bin/python`, the job aborts by design — the
-environment did not activate.
+If you instead see `ERROR: this python cannot import torch / ultralytics / cv2`, the job aborts by design: the Python on that compute node cannot load the project's packages. Nothing downstream would have worked.
 
 **Check:** `ls runs/granularity/*/weights/best.pt` — all three must exist.
 
@@ -461,8 +467,9 @@ in the paper.
 qsub -I -l select=1:ncpus=8:ngpus=1:mem=40gb -q gpu -l walltime=02:00:00
 
 cd ~/IBM_Internship/autonomous_detection
-source /home/soft/anaconda3/etc/profile.d/conda.sh
-conda activate auto_det
+# No conda activation. The auto_det env on this cluster is an empty shell
+# (no bin/python). The real stack is the system python 3.9 with packages
+# in ~/.local, which is what `python` resolves to by default.
 
 python inference/adas_final.py \
     --source demo/india_clip.mp4 \

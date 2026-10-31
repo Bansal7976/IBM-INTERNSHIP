@@ -48,11 +48,13 @@ NEXT=""
 
 # ---------------------------------------------------------------- 0. env
 echo "ENVIRONMENT"
-if python -c "import ultralytics" 2>/dev/null; then
-    status_line DONE "conda env auto_det + ultralytics" "$(command -v python)"
+# The auto_det conda env on this cluster is an empty shell (no bin/python), so
+# the test is simply: can the python we will actually use import the stack?
+if python -c "import torch, ultralytics, cv2" 2>/dev/null; then
+    status_line DONE "python can import torch/ultralytics/cv2" "$(command -v python)"
 else
-    status_line TODO "conda env auto_det + ultralytics" "run: conda activate auto_det"
-    NEXT="source /home/soft/anaconda3/etc/profile.d/conda.sh && conda activate auto_det"
+    status_line TODO "python can import torch/ultralytics/cv2" "$(command -v python)"
+    NEXT="python -m pip install --user ultralytics   # then re-run this script"
 fi
 
 if [ -d logs ]; then
@@ -154,7 +156,7 @@ echo "5. RESULTS"
 for f in results/granularity_comparison.json:"job 3 -- the main table" \
          results/granularity_comparison_conf010.json:"job 3 -- threshold check" \
          results/conditions_decision.json:"job 4 -- night and low light" \
-         results/planning.json:"job 5 -- closed-loop planner"; do
+         results/planning_20seed.json:"closed-loop planner, 20 seeds"; do
     path="${f%%:*}"; label="${f##*:}"
     if [ -f "$path" ]; then
         status_line DONE "$label" "$path"
@@ -166,8 +168,8 @@ if [ "$TRAINED" -eq 3 ] && [ ! -f results/granularity_comparison.json ] && [ -z 
     NEXT="qsub training/pbs/granularity_step3_compare.pbs"
 elif [ -f results/granularity_comparison.json ] && [ ! -f results/conditions_decision.json ] && [ -z "$NEXT" ]; then
     NEXT="qsub -v LEVEL=decision training/pbs/india_night_eval.pbs"
-elif [ ! -f results/planning.json ] && [ -z "$NEXT" ]; then
-    NEXT="python evaluation/evaluate_planning.py --seeds 20 --out results/planning.json"
+elif [ ! -f results/planning_20seed.json ] && [ -z "$NEXT" ]; then
+    NEXT="qsub training/pbs/planning_eval.pbs    # CPU only, needs no data"
 fi
 echo ""
 

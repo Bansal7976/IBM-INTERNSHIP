@@ -1,3 +1,9 @@
+> **SUPERSEDED. Start with [HANDOVER.md](HANDOVER.md).** It is the single, current
+> source of truth for where the project stands and what to run. This file is kept for
+> its background detail. Its conda instructions were wrong for this cluster and have
+> been corrected: the `auto_det` env is an empty shell, and the real stack is the
+> system Python 3.9 with packages in `~/.local`.
+
 # HPC RUNBOOK — upload, then run the jobs one at a time
 
 Every command below is copy-paste. Replace `USER` with your cluster username
@@ -76,8 +82,9 @@ ls training/pbs/               # sanity: the scripts arrived
 
 ```bash
 cd ~/IBM_Internship/autonomous_detection
-source /home/soft/anaconda3/etc/profile.d/conda.sh
-conda activate auto_det
+# No conda activation. The auto_det env on this cluster is an empty shell
+# (no bin/python). The real stack is the system python 3.9 with packages
+# in ~/.local, which is what `python` resolves to by default.
 python scripts/verify_adas_pipeline.py
 ```
 
@@ -169,12 +176,13 @@ tail -f logs/gran_decision.log
 The first lines should read:
 
 ```
-python : /home/soft/anaconda3/envs/auto_det/bin/python
-conda environment: OK
+python : /usr/bin/python  (Python 3.9.21)
+environment: OK
 ```
 
-If instead you see `python resolved to /bin/python`, the job aborts by design —
-the environment did not activate and nothing downstream would have worked.
+If instead you see `ERROR: this python cannot import torch / ultralytics / cv2`,
+the job aborts by design: that compute node's Python cannot load the project's
+packages, so nothing downstream would have worked.
 
 **Done when each log ends with** `DONE [<level>]`.
 
@@ -253,8 +261,9 @@ Then:
 
 ```bash
 cd ~/IBM_Internship/autonomous_detection
-source /home/soft/anaconda3/etc/profile.d/conda.sh
-conda activate auto_det
+# No conda activation. The auto_det env on this cluster is an empty shell
+# (no bin/python). The real stack is the system python 3.9 with packages
+# in ~/.local, which is what `python` resolves to by default.
 
 python inference/adas_final.py \
     --source demo/india_clip.mp4 \

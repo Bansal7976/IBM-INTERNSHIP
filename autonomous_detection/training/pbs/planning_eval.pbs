@@ -1,0 +1,56 @@
+#!/bin/bash
+# CLOSED-LOOP PLANNER EVALUATION -- CPU only, no dataset needed
+#
+# Drives the planner through five Indian scenarios (village road with a
+# pedestrian stepping in, a stopped auto-rickshaw, an occluding truck, cattle
+# beside a handcart, a mountain bend) under three ablations: grouped clearances
+# (ours), one uniform clearance for every obstacle, and the competence gate off.
+#
+# 20 seeds, not 5. At 5 seeds the completion rates are too noisy to separate 80%
+# from 100%: one scenario scored 0% at 3 seeds and 80% at 5.
+#
+# Submit:  qsub training/pbs/planning_eval.pbs
+#PBS -N Plan_Eval
+#PBS -l select=1:ncpus=4:mem=8gb
+#PBS -q workq
+#PBS -l walltime=06:00:00
+#PBS -o logs/planning_eval.log
+#PBS -j oe
+#
+# NOTE: `#PBS -V` is deliberately ABSENT -- it exports the submitting shell's
+# environment and caused earlier jobs to resolve the wrong python.
+
+set -o pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+
+# ENVIRONMENT: the conda env "auto_det" on this cluster is an empty shell, so
+# the real stack is the system python 3.9 with packages under ~/.local.
+export PATH="$HOME/.local/bin:$PATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:${PYTHONPATH:-}"
+
+echo "python : $(command -v python)  ($(python --version 2>&1))"
+if ! python -c "import numpy, scipy" 2>/dev/null; then
+    echo "ERROR: this python cannot import numpy / scipy"
+    exit 1
+fi
+echo "environment: OK"
+
+mkdir -p results
+
+echo "============================================"
+echo "  CLOSED-LOOP PLANNING EVALUATION  (20 seeds)"
+echo "  $(date)"
+echo "============================================"
+
+python -u evaluation/evaluate_planning.py --seeds 20 --out results/planning_20seed.json || exit 1
+
+echo ""
+echo "============================================"
+echo "  DONE  $(date)"
+echo "  results/planning_20seed.json"
+echo ""
+echo "  Read the VULNERABLE-gap column first, then the completion column NEXT TO"
+echo "  it. The grouped taxonomy leaves a pedestrian more room and completes the"
+echo "  route less often; report both, as a trade-off, not as a win."
+echo "============================================"
