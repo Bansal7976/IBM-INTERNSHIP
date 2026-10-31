@@ -36,28 +36,26 @@ set -o pipefail
 
 cd "$PBS_O_WORKDIR" || exit 1
 
-source /home/soft/anaconda3/etc/profile.d/conda.sh
-conda activate auto_det
-
-case "$(command -v python)" in
-    *auto_det*) ;;
-    *)
-        ENV_BIN="$(conda info --base 2>/dev/null)/envs/auto_det/bin"
-        if [ -x "$ENV_BIN/python" ]; then
-            echo "conda activate did not take effect; using $ENV_BIN directly"
-            export PATH="$ENV_BIN:$PATH"
-        fi
-        ;;
-esac
-
+# ENVIRONMENT. The conda env "auto_det" on this cluster is an EMPTY SHELL --
+# it contains only conda-meta/ and etc/, no bin/python -- so activating it
+# never put a working interpreter on PATH, and jobs aborted with "python
+# resolved to /bin/python". The real stack is the system Python 3.9 with
+# packages pip-installed under ~/.local (torch 2.8.0+cu128, ultralytics 8.4.86),
+# which is what everything here has actually been running on. Use that
+# directly instead of pretending conda is involved.
 export PATH="$HOME/.local/bin:$PATH"
-export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-echo "python : $(command -v python)"
-case "$(command -v python)" in
-    *auto_det*) echo "conda environment: OK" ;;
-    *) echo "ERROR: python resolved to $(command -v python), not auto_det"; exit 1 ;;
-esac
+echo "python : $(command -v python)  ($(python --version 2>&1))"
+if ! python -c "import torch, ultralytics, cv2" 2>/tmp/envcheck.$$; then
+    echo "ERROR: this python cannot import torch / ultralytics / cv2:"
+    cat /tmp/envcheck.$$
+    echo "Fix the install on the login node:  python -m pip install --user ultralytics"
+    exit 1
+fi
+rm -f /tmp/envcheck.$$
+echo "environment: OK"
 
 # Prefer the NATIVE-vocabulary conversions over the merged 15-class set.
 #

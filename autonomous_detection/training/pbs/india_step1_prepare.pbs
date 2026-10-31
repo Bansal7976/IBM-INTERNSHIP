@@ -28,50 +28,26 @@ set -o pipefail
 
 cd "$PBS_O_WORKDIR" || exit 1
 
-source /home/soft/anaconda3/etc/profile.d/conda.sh
-conda activate auto_det
-
-# Fallback: if activation did not take effect for any reason, put the
-# environment's bin directory on PATH directly. This bypasses conda's shell
-# machinery entirely and is what actually matters — having the right
-# interpreter first on PATH.
-case "$(command -v python)" in
-    *auto_det*) ;;
-    *)
-        ENV_BIN="$(conda info --base 2>/dev/null)/envs/auto_det/bin"
-        if [ -x "$ENV_BIN/python" ]; then
-            echo "conda activate did not take effect; using $ENV_BIN directly"
-            export PATH="$ENV_BIN:$PATH"
-        fi
-        ;;
-esac
-
+# ENVIRONMENT. The conda env "auto_det" on this cluster is an EMPTY SHELL --
+# it contains only conda-meta/ and etc/, no bin/python -- so activating it
+# never put a working interpreter on PATH, and jobs aborted with "python
+# resolved to /bin/python". The real stack is the system Python 3.9 with
+# packages pip-installed under ~/.local (torch 2.8.0+cu128, ultralytics 8.4.86),
+# which is what everything here has actually been running on. Use that
+# directly instead of pretending conda is involved.
 export PATH="$HOME/.local/bin:$PATH"
-export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:$PYTHONPATH"
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-echo "============================================"
-echo "  STEP 1 — UVH-26 download + conversion"
-echo "  $(date)"
-echo "============================================"
-echo "python : $(command -v python)"
-echo "version: $(python --version 2>&1)"
-
-# Abort loudly if we still do not have the environment's interpreter, rather
-# than continuing and failing confusingly several steps later.
-case "$(command -v python)" in
-    *auto_det*)
-        echo "conda environment: OK"
-        ;;
-    *)
-        echo ""
-        echo "ERROR: python resolved to $(command -v python), which is not the"
-        echo "auto_det environment, so the project's packages are not"
-        echo "importable. Both 'conda activate auto_det' and the direct-PATH"
-        echo "fallback failed. Check that $(conda info --base 2>/dev/null)/envs/auto_det"
-        echo "exists and is readable from this compute node."
-        exit 1
-        ;;
-esac
+echo "python : $(command -v python)  ($(python --version 2>&1))"
+if ! python -c "import torch, ultralytics, cv2" 2>/tmp/envcheck.$$; then
+    echo "ERROR: this python cannot import torch / ultralytics / cv2:"
+    cat /tmp/envcheck.$$
+    echo "Fix the install on the login node:  python -m pip install --user ultralytics"
+    exit 1
+fi
+rm -f /tmp/envcheck.$$
+echo "environment: OK"
 
 # ---------------------------------------------------------------- download ---
 # Uses `python -m pip` and the huggingface_hub Python API rather than the
