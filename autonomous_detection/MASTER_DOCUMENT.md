@@ -3,8 +3,8 @@
 **Smart India Hackathon 2026 · Problem Statement SIH26037 · Organisation: MathWorks**
 Theme: Robotics and Drones · Category: Software
 
-**Team:** Krish Manwani · Vishal Bansal
-**Guided by:** Pranshu Chander · Bhushan Singh Negi
+**Team:** Krish Manwani  Vishal Bansal
+**Guided by:** Pranshu Chander Bhushan Singh Negi
 
 ---
 

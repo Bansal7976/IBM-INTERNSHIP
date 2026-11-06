@@ -1,0 +1,16 @@
+# Merged KITTI + BDD100K (+nuScenes), unified 11 classes
+path: /home/krish.123449/autonomous_detection/data/merged_yolo
+train: train/images
+val: val/images
+names:
+  0: car
+  1: truck
+  2: bus
+  3: van
+  4: pedestrian
+  5: cyclist
+  6: motorcycle
+  7: tram
+  8: traffic_light
+  9: traffic_sign
+  10: misc

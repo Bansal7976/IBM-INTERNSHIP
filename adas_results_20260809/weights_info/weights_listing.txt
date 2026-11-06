@@ -1,0 +1,18 @@
+total 5.6G
+-rw-r--r-- 1 krish.123449 krish.123449 218M Aug  8 12:35 best.onnx
+-rw------- 1 krish.123449 krish.123449 110M Jul 11 06:45 best.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 01:37 epoch0.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 03:20 epoch100.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 03:47 epoch125.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 04:12 epoch150.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 04:37 epoch175.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 05:03 epoch200.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 05:29 epoch225.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 05:55 epoch250.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 02:02 epoch25.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 06:21 epoch275.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 02:28 epoch50.pt
+-rw------- 1 krish.123449 krish.123449 436M Jul 11 02:54 epoch75.pt
+-rw------- 1 krish.123449 krish.123449 110M Jul 11 06:45 last.pt
+best.pt  = runs/final/yolo11x_merged-2/weights/best.pt  (114 MB)
+best.onnx = runs/final/yolo11x_merged-2/weights/best.onnx (217 MB)
